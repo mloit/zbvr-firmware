@@ -1,5 +1,6 @@
-# Baseline 5.8 – Retro Radio (synced AM + DF fade, stable resume, Option A album wrap)
+# Baseline 5.9.1 - Retro Radio (synced AM + DF fade, stable resume, album-change replays AM)
 # Option A: if next album (long-press) does not exist / does not confirm BUSY, wrap to Album 1 Track 1
+# Fix in 5.9.1: avoid double AM when wrapping after a missing album by probing silently first
 
 from machine import Pin, PWM, Timer, UART
 import neopixel, ustruct, time
@@ -33,6 +34,9 @@ MAX_ALBUM_NUM   = 99             # folders 01..99 available
 # BUSY behavior
 BUSY_CONFIRM_MS = 1800           # how long we wait for BUSY low to confirm a track started
 POST_CMD_GUARD_MS = 120          # small pause between stop and play commands
+
+# Album probe behavior (silent, no AM)
+ALBUM_PROBE_MS  = 650            # quick check for BUSY low when testing candidate album
 
 # ===========================
 #   NeoPixel + Pins
@@ -207,7 +211,6 @@ def play_am_and_fade_df_confirming(folder, track):
     """
     global pwm, tim
 
-    # Start DF track immediately (synced start)
     df_stop()
     time.sleep_ms(POST_CMD_GUARD_MS)
     df_play_folder_track(folder, track)
@@ -224,7 +227,6 @@ def play_am_and_fade_df_confirming(folder, track):
 
     state = {"idx": 0, "n": len(data), "done": False}
 
-    # fade AM out at the very end
     fade_out_s = 0.8
     fo = int(SR * fade_out_s)
     if fo > state["n"]:
@@ -258,7 +260,6 @@ def play_am_and_fade_df_confirming(folder, track):
 
     tim.init(freq=SR, mode=Timer.PERIODIC, callback=isr_cb)
 
-    # DF fade steps spread across FADE_IN_S (or the AM length, whichever is shorter)
     fade_steps = 20
     fade_delay = int((FADE_IN_S * 1000) / fade_steps)
     if fade_delay < 40:
@@ -271,7 +272,6 @@ def play_am_and_fade_df_confirming(folder, track):
         for step in range(fade_steps + 1):
             df_set_vol(int((step / fade_steps) * DFPLAYER_VOL))
 
-            # while we wait between volume steps, keep checking BUSY
             t_start = time.ticks_ms()
             while time.ticks_diff(time.ticks_ms(), t_start) < fade_delay:
                 if (not confirmed) and (time.ticks_diff(time.ticks_ms(), confirm_deadline) <= 0):
@@ -285,7 +285,6 @@ def play_am_and_fade_df_confirming(folder, track):
             if state["done"]:
                 break
 
-        # wait until AM finishes if it hasn't yet
         while not state["done"]:
             if (not confirmed) and (time.ticks_diff(time.ticks_ms(), confirm_deadline) <= 0):
                 if pin_busy.value() == 0:
@@ -372,10 +371,48 @@ def play_current(label=""):
     return False
 
 # ===========================
+#   Album change helpers (5.9.1)
+# ===========================
+
+def probe_album_silent(folder, track):
+    """
+    Silent existence probe for an album.
+    No AM playback. Volume forced to 0.
+    Returns True if BUSY goes LOW quickly.
+    """
+    print("Probe album (silent): folder", folder, "track", track)
+    df_set_vol(0)
+    df_stop()
+    time.sleep_ms(POST_CMD_GUARD_MS)
+    df_play_folder_track(folder, track)
+    return wait_for_busy_low(ALBUM_PROBE_MS)
+
+def play_album_change_with_am(label=""):
+    """
+    Used for confirmed album changes.
+    Replays AM WAV and fades in the first track of the folder under it.
+    Returns True if BUSY confirms playback started during the AM window.
+    """
+    global ignore_busy_until, current_album, current_track
+
+    print("Album change request", ("[" + label + "]" if label else ""), "album", current_album, "track", current_track)
+
+    df_set_vol(0)
+    confirmed = play_am_and_fade_df_confirming(current_album, current_track)
+
+    if confirmed:
+        note_track_learned(current_album, current_track)
+        ignore_busy_until = time.ticks_add(time.ticks_ms(), 2000)
+        return True
+
+    print("No BUSY LOW -> not confirmed (during AM album-change window)")
+    return False
+
+# ===========================
 #     MAIN BOOT LOGIC
 # ===========================
 
-print("Booting Retro Radio Baseline 5.8")
+print("Booting Retro Radio Baseline 5.9.1")
 
 print("Waiting for GP14 HIGH (power sense)...")
 last_hint = time.ticks_ms()
@@ -426,17 +463,23 @@ while True:
             if candidate > MAX_ALBUM_NUM:
                 candidate = 1
 
+            # Save intent immediately
             current_album = candidate
             current_track = 1
             save_state("long press album change")
 
-            if not play_current("next album"):
-                # OPTION A: wrap to album 1 track 1
+            # 5.9.1 behavior:
+            # Probe silently first to avoid double AM when wrapping.
+            if probe_album_silent(current_album, current_track):
+                # Candidate exists, now do the full AM + fade experience (this restarts track 1)
+                play_album_change_with_am("next album (with AM)")
+            else:
+                # Candidate missing, wrap and only play AM once for album 1
                 print("Album", candidate, "did not confirm. Wrapping to album 1 track 1.")
                 current_album = 1
                 current_track = 1
                 save_state("wrap to album 1 after missing album")
-                play_current("wrapped album 1")
+                play_album_change_with_am("wrapped album 1 (with AM)")
 
             tap_count = 0
             last_release_time = 0
@@ -528,5 +571,3 @@ while True:
 
     last_button = curr
     time.sleep_ms(10)
-
-
