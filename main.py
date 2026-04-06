@@ -29,7 +29,12 @@
 # - converted the main loop into a state machine
 # - added exception handling to main, to clean up nicely on a crash or when Thonny stops the program
 
-_VERSION = "26.0.1 ALPHA"
+# Known issues with ALPHA
+# - if there is a gap in folder names, some folders after the gaps may be mised
+#   -- solution, either scan for all 99 possibilities, or make the caviat that foldernames cannot
+#      be skipped, but folders can be left empty
+
+_VERSION = "26.0.1 ALPHA-2"
 
 import micropython
 micropython.opt_level(3) # comment out this line when debugging
@@ -129,8 +134,9 @@ class State:
     MEDIA_CHECK = 3 # Check and wait for SD Card
     START_UP    = 5 # Initialize playlist, start first track
     PLAY_TRACK  = 6 # Normal run state, plays to the end of the track
-    PLAY_NEXT   = 7
-    POWER_DN    = 8 # Potentiometer just turned off (Next: IDLE)
+    PLAY_NEXT   = 7 # normal advance to next track
+    NEXT_ALBUM  = 8 # special advance where effect is played at transition
+    POWER_DN    = 9 # Potentiometer just turned off (Next: IDLE)
 
 app_state = State.IDLE
 states = {}
@@ -282,9 +288,13 @@ def app_play(last):
     if button.has_event():
         dfp.stop()
 
-    if not dfp.is_playing():
+    if (not dfp.is_playing()) or button.has_event():
         album, track = playlist.current()
-        print(f"Album {album:02d} Track {track:03d} playback complete")
+        if button.has_event():
+            dfp.stop()
+            print(f"Album {album:02d} Track {track:03d} playback stopped")
+        else:
+            print(f"Album {album:02d} Track {track:03d} playback complete")
         if(Config.USE_LED):
             led.color(App.Colors.IDLE)
         app_wait(App.Timing.GUARD)
@@ -311,6 +321,8 @@ def app_next(last):
     if evt == Controls.Event.LONG: # next album
         print(" -- Long button press detected: Next Album")
         album, track = playlist.next_album()
+        print(f"Changing to: Album {album:02d} Track {track:03d}")
+        return State.NEXT_ALBUM
     elif evt == Controls.Event.TRIPLE: # restart album
         print(" -- Triple button press detected: Restarting Album")
         playlist.restart_album()
@@ -329,6 +341,31 @@ def app_next(last):
     return State.PLAY_TRACK
 
 states[State.PLAY_NEXT] = app_next
+
+# ****************************************************************************
+# normal loop body
+# sets up next album to play, and begins play with AM Radio effect
+def app_next_album(last):
+    if(last == State.NEXT_ALBUM):
+        return State.PLAY_TRACK
+    
+    if power_sense.value() == 0:
+        print("Power Off Detected")
+        return State.POWER_DN
+
+    # start by playing the first album & track, with AM radio effect
+    album, track = playlist.current()
+
+    print(f"Now Playing: Album {album:02d} Track {track:03d}")
+
+    if App.Effects.ENABLE and App.Effects.ON_ALBUM:
+        fade_and_play_effect(album, track)
+    else:
+        dfp.play_folder_track(album, track)
+    
+    return State.PLAY_TRACK
+states[State.NEXT_ALBUM] = app_next_album
+
 
 # ****************************************************************************
 # power was turned off
