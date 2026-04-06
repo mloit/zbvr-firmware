@@ -1,593 +1,516 @@
-# Baseline 5.9.2 - Retro Radio
-# Change: Clear album_state.txt only after a true RP2040 power cycle (PWRON_RESET)
-# Goal: If the RP loses power and comes back, start fresh with no stale learned state
-# Note: Thonny "MPY: soft reboot" will NOT clear state
+# *****************************************************************************
+#       Project: ZBVR - Zion Brock Vintage Radio
+#  Project Repo: https://github.com/mloit/zbvr-firmware
+#         About: Baseline firmware for the Zion Brock Vintage Radio 
+#
+#          File: main.py
+#       Version: 26.0.1 Alpha
+#   Description: main application logic for the Vintage Radio Firmware
+# 
+#        Author: Mark Loit
+#        Credit: Zion Brock
+#
+#       License: CC BY-NC-SA
+# 
+#  (c) Copyright 2026 Mark Loit. All Rights Reserved.
+# ****************************************************************************
+# Baseline 26.0.1 - Retro Radio 
+#
+#
+# Notes:
+# - Total refactor of Zion's original "5.9.1" code 
+# - Modularized most things to make it more maintanable 
+# - Centralized configuration settings into 'config.py'
+# - Added bi-directional commmunications withteh DFPlayer
+# - Removed blind searching if another track or folder exists
+# - Added generation of the playlist at boot to only have folders with valid tracks to prevent lockups
+# - Added colours to varous states to give more visual feedback
+# - made the button monitoring timer based, to simplify the main loop
+# - converted the main loop into a state machine
+# - added exception handling to main, to clean up nicely on a crash or when Thonny stops the program
 
-from machine import Pin, PWM, Timer, UART
-import neopixel, ustruct, time
-import machine, os
+_VERSION = "26.0.1 ALPHA"
 
-# ===========================
-#      CONFIGURATION
-# ===========================
+import micropython
+micropython.opt_level(3) # comment out this line when debugging
+micropython.alloc_emergency_exception_buf(100)
 
-PIN_AUDIO       = 3
-PIN_BUTTON      = 2
-PIN_NEOPIX      = 16
-PIN_UART_TX     = 0
-PIN_UART_RX     = 1
-PIN_SENSE       = 14      # power sense from Rail 2 (pot)
-PIN_BUSY        = 15      # DFPlayer BUSY (0 = playing, 1 = idle)
+from machine import Pin, I2C
+import time, sys, machine
 
-VOLUME          = 1.0
-WAV_FILE        = "AMradioSound.wav"
-PWM_CARRIER     = 125_000
-DFPLAYER_VOL    = 28
+from config import App, Config
+from led import LED
+from audioplayer import WAV
+from dfplayer import DFPlayer
+from controls import Controls
+from playlist import Playlist
 
-FADE_IN_S       = 2.4            # time to ramp DF volume up while AM plays
-DF_BOOT_MS      = 2000           # time after GP14 HIGH before DF reset/play
+lev = micropython.opt_level()
+print(f"\nMicroPython Optimization Level: {lev}")
+micropython.mem_info()
 
-LONG_PRESS_MS   = 1000           # hold for NEXT ALBUM
-TAP_WINDOW_MS   = 800            # time after last tap to decide 1/2/3 taps
+print("\nInitiailzing Modules")
 
-ALBUM_FILE      = "album_state.txt"
-MAX_ALBUM_NUM   = 99             # folders 01..99 available
+if(Config.USE_LED):
+    led = LED(Config.LED.PIN)
+    led.color(Config.LED.DEFAULT)
 
-# BUSY behavior
-BUSY_CONFIRM_MS = 1800           # how long we wait for BUSY low to confirm a track started
-POST_CMD_GUARD_MS = 120          # small pause between stop and play commands
+# initialize the sense GPIO's
+power_sense = Pin(Config.Sense.PIN, Pin.IN, Pin.PULL_DOWN)
 
-# Album probe behavior (silent, no AM)
-ALBUM_PROBE_MS  = 650            # quick check for BUSY low when testing candidate album
+# not used anymore, initialized anyway to prevent side-effects
+pin_busy    = Pin(Config.Busy.PIN, Pin.IN, Pin.PULL_DOWN)  
 
-# ===========================
-#   NeoPixel + Pins
-# ===========================
+# configure the DFPlayer module
+dfp = DFPlayer(Config.DFPlayer.UART.UNIT, 
+               tx = Config.DFPlayer.UART.Pins.TX, 
+               rx = Config.DFPlayer.UART.Pins.RX)
 
-np = neopixel.NeoPixel(Pin(PIN_NEOPIX), 1)
-np[0] = (4, 4, 4)
-np.write()
+# configure the button control module
+button = Controls(Config.Button.PIN, 
+                  pull        = Config.Button.PULL,
+                  invert      = Config.Button.INVERT, 
+                  rate        = Config.Button.RATE, 
+                  debounce    = Config.Button.DEBOUNCE, 
+                  tap_gap     = Config.Button.TAP_GAP,
+                  short_press = Config.Button.SHORT_PRESS, 
+                  long_press  = Config.Button.LONG_PRESS)
 
-button      = Pin(PIN_BUTTON, Pin.IN, Pin.PULL_UP)
-power_sense = Pin(PIN_SENSE, Pin.IN, Pin.PULL_DOWN)
-pin_busy    = Pin(PIN_BUSY, Pin.IN)
+# configure I2C if used
+if(Config.USE_I2C):
+    i2c = I2C(Config.I2C.UNIT, 
+              sda  = Config.I2C.Pins.SDA, 
+              scl  = Config.I2C.Pins.SCL, 
+              freq = Config.I2C.RATE)
 
-uart = UART(0, baudrate=9600, tx=Pin(PIN_UART_TX), rx=Pin(PIN_UART_RX))
+# ****************************************************************************
+# Playlist Handling
+# ****************************************************************************
+playlist = Playlist()
 
-pwm = None
-tim = None
-MID = 32768
+restore_playlist = False
+playlist_restore_idx = -1
+playlist_restore_trk = 0
 
-current_album = 1
-current_track = 1
+# Dynamically determines the playlist from the contents of the SD 
+def generate_playlist(folders = -1):
+    if folders == -1:
+        folders = dfp.get_folder_count()
 
-# album -> highest track index confirmed to play
-KNOWN_TRACKS = {}
+    if folders == 0:
+        print("SDCard has no folders")
+        return
 
-# ignore BUSY edges after manual skips so they don't look like "track finished"
-ignore_busy_until = 0
-
-# ===========================
-#   DFPlayer helpers
-# ===========================
-
-def df_send(cmd, p1=0, p2=0):
-    pkt = bytearray([0x7E, 0xFF, 0x06, cmd, 0x00, p1 & 0xFF, p2 & 0xFF])
-    csum = -sum(pkt[1:7]) & 0xFFFF
-    pkt.append((csum >> 8) & 0xFF)
-    pkt.append(csum & 0xFF)
-    pkt.append(0xEF)
-    uart.write(pkt)
-    time.sleep_ms(30)
-
-def df_reset():
-    print("DF: RESET")
-    df_send(0x3F, 0x00, 0x00)
-    time.sleep_ms(800)
-
-def df_set_vol(v):
-    v = max(0, min(30, v))
-    print("DF: set volume", v)
-    df_send(0x06, 0x00, v)
-
-def df_play_folder_track(folder, track):
-    print("DF: play folder", folder, "track", track)
-    df_send(0x0F, folder, track)
-
-def df_stop():
-    print("DF: stop")
-    df_send(0x16, 0, 0)
-
-# ===========================
-#   Album state save / load
-# ===========================
-
-def clear_state_file(reason=""):
-    global current_album, current_track, KNOWN_TRACKS
-    try:
-        if ALBUM_FILE in os.listdir("/"):
-            os.remove("/" + ALBUM_FILE)
-            print("Cleared album_state.txt", ("[" + reason + "]" if reason else ""))
-    except Exception as e:
-        print("State clear error:", e)
-
-    current_album = 1
-    current_track = 1
-    KNOWN_TRACKS = {}
-
-def load_state():
-    global current_album, current_track, KNOWN_TRACKS
-    try:
-        with open(ALBUM_FILE, "r") as f:
-            raw = f.read().strip()
-        print("Loaded raw album_state:", raw)
-
-        parts = raw.split(";")
-        a_str, t_str = parts[0].split(",")
-        current_album = int(a_str)
-        current_track = int(t_str)
-
-        KNOWN_TRACKS = {}
-        if len(parts) > 1 and parts[1].startswith("tracks="):
-            track_part = parts[1][7:]
-            if track_part:
-                for pair in track_part.split(","):
-                    if not pair:
-                        continue
-                    a, c = pair.split(":")
-                    KNOWN_TRACKS[int(a)] = int(c)
-
-        print("Loaded album", current_album, "track", current_track)
-        print("Loaded KNOWN_TRACKS:", KNOWN_TRACKS)
-
-    except Exception as e:
-        print("No valid album_state.txt, starting fresh. Reason:", e)
-        current_album = 1
-        current_track = 1
-        KNOWN_TRACKS = {}
-
-def save_state(reason=""):
-    global current_album, current_track, KNOWN_TRACKS
-    try:
-        track_str = ",".join("%d:%d" % (a, c) for a, c in sorted(KNOWN_TRACKS.items()))
-        payload = f"{current_album},{current_track};tracks={track_str}"
-        with open(ALBUM_FILE, "w") as f:
-            f.write(payload)
-        print("Saved state", ("[" + reason + "]" if reason else ""), ":", payload)
-    except Exception as e:
-        print("State save error:", e)
-
-# ===========================
-#       WAV Loader
-# ===========================
-
-def load_wav_u8(path):
-    with open(path, "rb") as f:
-        if f.read(4) != b"RIFF":
-            raise ValueError("Not RIFF")
-        f.read(4)
-        if f.read(4) != b"WAVE":
-            raise ValueError("Not WAVE")
-        samplerate = 8000
-        while True:
-            cid = f.read(4)
-            if not cid:
-                raise ValueError("No data chunk")
-            clen = ustruct.unpack("<I", f.read(4))[0]
-            if cid == b"fmt ":
-                fmt = f.read(clen)
-                samplerate = ustruct.unpack("<I", fmt[4:8])[0]
-            elif cid == b"data":
-                data = f.read(clen)
-                break
-            else:
-                f.seek(clen, 1)
-    return data, samplerate
-
-print("Loading WAV:", WAV_FILE)
-data, SR = load_wav_u8(WAV_FILE)
-
-lut = [0] * 256
-scale = int(256 * VOLUME)
-for i in range(256):
-    d = MID + (i - 128) * scale
-    d = max(0, min(65535, d))
-    lut[i] = d
-
-# ===========================
-#   BUSY helpers
-# ===========================
-
-def wait_for_busy_low(timeout_ms=BUSY_CONFIRM_MS):
-    start = time.ticks_ms()
-    while time.ticks_diff(time.ticks_ms(), start) < timeout_ms:
-        if pin_busy.value() == 0:
-            return True
-        time.sleep_ms(25)
-    return False
-
-def note_track_learned(album, track):
-    global KNOWN_TRACKS
-    prev = KNOWN_TRACKS.get(album, 0)
-    if track > prev:
-        KNOWN_TRACKS[album] = track
-        print("Learned track", track, "for album", album, "-> KNOWN_TRACKS =", KNOWN_TRACKS)
-        save_state("learned track")
-
-# ===========================
-#   Synced AM playback + DF fade + confirm
-# ===========================
-
-def play_am_and_fade_df_confirming(folder, track):
-    """
-    Start DF play immediately, then play AM WAV while fading DF volume up.
-    During the fade, we watch BUSY for a confirmation that DF actually started.
-    Returns True if we confirm BUSY LOW at any point during the AM window.
-    """
-    global pwm, tim
-
-    df_stop()
-    time.sleep_ms(POST_CMD_GUARD_MS)
-    df_play_folder_track(folder, track)
-
-    np[0] = (0, 10, 0)
-    np.write()
-
-    print("RP: starting AM WAV (synced)")
-
-    p = Pin(PIN_AUDIO)
-    pwm = PWM(p)
-    pwm.freq(PWM_CARRIER)
-    pwm.duty_u16(MID)
-
-    state = {"idx": 0, "n": len(data), "done": False}
-
-    fade_out_s = 0.8
-    fo = int(SR * fade_out_s)
-    if fo > state["n"]:
-        fo = state["n"]
-    state["fade_out_samples"] = fo
-
-    tim = Timer()
-
-    def isr_cb(_t):
-        idx = state["idx"]
-        n = state["n"]
-        if idx >= n:
-            pwm.duty_u16(MID)
-            state["done"] = True
-            return
-
-        raw_duty = lut[data[idx]]
-        fo2 = state["fade_out_samples"]
-        if fo2 > 0 and idx >= n - fo2:
-            into = idx - (n - fo2)
-            remaining = fo2 - into
-            if remaining < 0:
-                remaining = 0
-            scale_val = (remaining * 256) // fo2
-            duty = MID + ((raw_duty - MID) * scale_val) // 256
+    print("Discovering playlist")
+    print("Scanning: ", end="")
+    
+    for dir in range(folders):
+        files = dfp.get_file_count(dir + 1)
+        if files:
+            print("+", end="")
+            playlist.add(dir+1, files)
         else:
-            duty = raw_duty
+            print(".",end="")
+    print("")
 
-        pwm.duty_u16(duty)
-        state["idx"] = idx + 1
+    albums = playlist.albums()
+    print("playlist contains", albums, "albums")
+    pl = playlist.all()
+    for entry in pl:
+        print(f"album: {entry[0]:02d} - {entry[1]} tracks")
 
-    tim.init(freq=SR, mode=Timer.PERIODIC, callback=isr_cb)
+# ****************************************************************************
+# State Machine
+# ****************************************************************************
+#state machine constants
+class State:
+    IDLE        = 0 # Idle state, Potentiometer in off poosition (Next: POWER_UP)
+    BOOT        = 2 # Potentiometer just turned on Wait for DFPlayer to boot (Next: START_UP)
+    MEDIA_CHECK = 3 # Check and wait for SD Card
+    START_UP    = 5 # Initialize playlist, start first track
+    PLAY_TRACK  = 6 # Normal run state, plays to the end of the track
+    PLAY_NEXT   = 7
+    POWER_DN    = 8 # Potentiometer just turned off (Next: IDLE)
 
-    fade_steps = 20
-    fade_delay = int((FADE_IN_S * 1000) / fade_steps)
+app_state = State.IDLE
+states = {}
+
+# break longer waits into smaller parts to allow background tasks to run
+def app_wait(duration):
+    if duration  > App.Timing.STEP:
+        time.sleep_ms(App.Timing.STEP)
+        duration -= App.Timing.STEP
+    time.sleep_ms(duration)
+
+# ****************************************************************************
+# states should accept one parameter assumed to be "next"
+# Idle state loop body
+# power is off
+def app_idle(last):
+    if(last != State.IDLE):
+        print("Waiting for Power On (potentiometer)")
+        if(Config.USE_LED):
+            led.color(App.Colors.IDLE)
+
+    if power_sense.value() == 1:
+        print("Power On Detected")
+        return State.BOOT
+
+    last_hint = time.ticks_ms()
+    while power_sense.value() == 0:
+        if time.ticks_diff(time.ticks_ms(), last_hint) > App.Timing.HINT:
+            print(" - waiting for power on")
+            return State.IDLE
+        app_wait(App.Timing.MAIN)
+    return State.IDLE
+
+states[State.IDLE] = app_idle
+
+# ****************************************************************************
+# power was turned on, wait for DFPlayer to boot. 
+def app_boot(last):
+    if(last != State.BOOT):
+        print("Waiting for DFPlayer to come online")
+        if(Config.USE_LED):
+            led.color(App.Colors.WAITING)
+    if power_sense.value() == 0:
+        print("Power Off Detected")
+        return State.POWER_DN
+    if dfp.is_online():
+        print("DFPlayer online, ready to proceed")
+        return State.MEDIA_CHECK
+    
+    return State.BOOT
+
+states[State.BOOT] = app_boot
+
+# ****************************************************************************
+# DFPlayer is booted, check for media, wait if necessary
+def app_media_check(last):
+    if(last != State.MEDIA_CHECK):
+        no_card = not dfp.has_sdc()
+        print("SDCard ", end="")
+        if no_card:
+            print("NOT ", end="")
+        print("present")
+
+        if no_card:
+            print("Waiting for SDCard insertion")
+            if(Config.USE_LED):
+                led.color(App.Colors.WAITING)
+            return State.MEDIA_CHECK
+        return State.START_UP
+
+    last_hint = time.ticks_ms()
+    while not dfp.has_sdc():
+        if time.ticks_diff(time.ticks_ms(), last_hint) > App.Timing.HINT:
+            print(" - still waiting SDCard insertion")
+            return State.MEDIA_CHECK
+        app_wait(App.Timing.MAIN)
+
+    print("SDCard inserted")
+    if(Config.USE_LED):
+        led.color(App.Colors.IDLE)
+
+    return State.START_UP
+
+states[State.MEDIA_CHECK] = app_media_check
+
+# ****************************************************************************
+# Generate the playlist
+# Get first track playing with AMRadio effect
+# button handler set-up on exit
+# non looping, one pass, and it advances
+def app_start_up(last):
+    global restore_playlist, playlist_restore_idx, playlist_restore_trk
+
+    if power_sense.value() == 0:
+        print("Power Off Detected")
+        return State.POWER_DN
+    if(last == State.START_UP):
+        return State.PLAY_TRACK
+
+    folders = dfp.get_folder_count()
+    total = dfp.get_total_files()
+
+    print("Filesystem has", total, "files in", folders, "folders")
+    #time.sleep_ms(Timing.Guard)
+
+    generate_playlist(folders)
+
+    # no point in continuing if there are no music files
+    if playlist.albums() == 0:
+        print("No albums or tracks found... Exiting")
+        raise OSError("No Music Found")
+    
+    # If this is a warm power-up, we can optionally continue where we left-off
+    if App.Playlist.PRESEVE and restore_playlist:
+        playlist.set_index(playlist_restore_idx)
+        playlist.set_track(playlist_restore_trk)
+    
+    print("\n" + "*" * 40 + "\n")
+ 
+    # start by playing the first album & track, with AM radio effect
+    album, track = playlist.current()
+
+    print(f"Now Playing: Album {album:02d} Track {track:03d}")
+
+    if App.Effects.ENABLE and App.Effects.ON_START:
+        fade_and_play_effect(album, track)
+    else:
+        dfp.play_folder_track(album, track)
+
+    button.start() # start the button monitor 
+
+    return State.PLAY_TRACK
+
+states[State.START_UP] = app_start_up
+
+# ****************************************************************************
+# normal loop body
+# Assumes a track is already playing on entry
+def app_play(last):
+    if(last != State.PLAY_TRACK):
+        print(" - Waiting for playback to complete")
+        if(Config.USE_LED):
+            led.color(App.Colors.PLAYING_SONG)
+    if power_sense.value() == 0:
+        print("Power Off Detected")
+        return State.POWER_DN
+
+    # any button press event will result in a change of tracks
+    if button.has_event():
+        dfp.stop()
+
+    if not dfp.is_playing():
+        album, track = playlist.current()
+        print(f"Album {album:02d} Track {track:03d} playback complete")
+        if(Config.USE_LED):
+            led.color(App.Colors.IDLE)
+        app_wait(App.Timing.GUARD)
+        return State.PLAY_NEXT
+    return State.PLAY_TRACK
+
+states[State.PLAY_TRACK] = app_play
+
+# ****************************************************************************
+# normal loop body
+# sets up next track to play
+def app_next(last):
+    if(last == State.PLAY_NEXT):
+        return State.PLAY_TRACK
+    
+    if power_sense.value() == 0:
+        print("Power Off Detected")
+        return State.POWER_DN
+    
+    evt = Controls.Event.NONE
+    if button.has_event():
+        evt = button.get_event()
+
+    if evt == Controls.Event.LONG: # next album
+        print(" -- Long button press detected: Next Album")
+        album, track = playlist.next_album()
+    elif evt == Controls.Event.TRIPLE: # restart album
+        print(" -- Triple button press detected: Restarting Album")
+        playlist.restart_album()
+        album, track = playlist.current()
+    elif evt == Controls.Event.DOUBLE: # previous track
+        print(" -- Double button press detected: Previous Track")
+        album, track = playlist.previous_track(App.Playlist.CYCLE_ALBUMS)
+    else: # normal advance, or single press for next track
+        if evt == Controls.Event.SINGLE:
+            print(" -- Single button press detected: Next Track")
+        album, track = playlist.next_track(App.Playlist.CYCLE_ALBUMS)
+
+    print(f"Now Playing: Album {album:02d} Track {track:03d}")
+    dfp.play_folder_track(album,track)
+
+    return State.PLAY_TRACK
+
+states[State.PLAY_NEXT] = app_next
+
+# ****************************************************************************
+# power was turned off
+# notify DFPlayer opbject of power state change
+# reset playlist
+# disable button handler
+# non looping, one pass, and it advances
+def app_power_down(last):
+    global restore_playlist, playlist_restore_idx, playlist_restore_trk
+
+    if(last == State.POWER_DN):
+        return State.IDLE
+
+    if(Config.USE_LED):
+        led.color(App.Colors.IDLE)
+
+    button.stop() # stop the button monitor 
+
+    # inform the DFPlayer object that power is off
+    dfp.set_offline()
+
+    # invalidate the playlist, preserving state for possible restoration
+    restore_playlist = True
+    playlist_restore_idx = playlist.get_index()
+    playlist_restore_trk = playlist.get_track()
+    playlist.clear()
+
+    print("Power-Down")
+    return State.IDLE
+
+states[State.POWER_DN] = app_power_down
+
+# ****************************************************************************
+# AM Radio Effect Playback
+# ****************************************************************************
+def fade_and_play_effect(folder, track):
+    if not dfp.is_stopped():
+        dfp.stop()
+
+    # start playing the new track
+    dfp.volume(0)
+    try:
+        dfp.play_folder_track(folder, track)
+    except:
+        print(f"unable to start Album {folder:02d} Track {track:03d}")
+        dfp.volume(Config.DFPlayer.VOLUME) # exit with volume set to expected state
+        raise
+
+    if(Config.USE_LED):
+        led.color(App.Colors.PLAYING_WAV)
+
+    # the PWM player uses a lot of python resources, and causes problems
+    # with out uart code in the DFPlayer. To reduce risk of issue here
+    # we temporarily disable command acknowledgements to reduce traffic
+    ack_mode = dfp.disable_reliability()
+
+    print(f"PWM Audio: starting  '{Config.Audio.FILE}'")
+    wav.play(fade_out=Config.Audio.FADE_OUT)
+
+    fade_steps = Config.DFPlayer.FADE_STEPS
+    fade_delay = int((Config.DFPlayer.FADE * 1000) / fade_steps)
     if fade_delay < 40:
         fade_delay = 40
 
-    confirmed = False
-    confirm_deadline = time.ticks_add(time.ticks_ms(), BUSY_CONFIRM_MS)
-
     try:
+        vol = 0
+        print(f"Fade-In Volume [{vol} ", end="")
         for step in range(fade_steps + 1):
-            df_set_vol(int((step / fade_steps) * DFPLAYER_VOL))
+            vol = int((step / fade_steps) * Config.DFPlayer.VOLUME)
+            print(">", end="")
+            dfp.volume(vol)
 
             t_start = time.ticks_ms()
             while time.ticks_diff(time.ticks_ms(), t_start) < fade_delay:
-                if (not confirmed) and (time.ticks_diff(time.ticks_ms(), confirm_deadline) >= 0):
-                    if pin_busy.value() == 0:
-                        confirmed = True
-                        print("BUSY went LOW -> playback started (confirmed during AM)")
-                if state["done"]:
+                if not wav.is_playing():
                     break
-                time.sleep_ms(10)
-
-            if state["done"]:
+                app_wait(10)
+        
+            if not wav.is_playing():
                 break
+        print(f" {vol}]")
 
-        while not state["done"]:
-            if (not confirmed) and (time.ticks_diff(time.ticks_ms(), confirm_deadline) >= 0):
-                if pin_busy.value() == 0:
-                    confirmed = True
-                    print("BUSY went LOW -> playback started (confirmed during AM)")
-            time.sleep_ms(20)
+        while wav.is_playing():
+            app_wait(20)
 
     finally:
-        try:
-            tim.deinit()
-        except:
-            pass
-        try:
-            pwm.duty_u16(MID)
-        except:
-            pass
-        np[0] = (0, 0, 0)
-        np.write()
-        print("RP: AM WAV done")
+        wav.stop()
 
-    return confirmed
+    # restore the DFPlayer command acknowledgement mode
+    dfp.enable_reliability(ack_mode)
 
-# ===========================
-#       Start Sequence
-# ===========================
+    if(Config.USE_LED):
+        led.color(App.Colors.PLAYING_SONG)
+    print(f"PWM Audio: '{Config.Audio.FILE}' playback complete")
 
-def start_sequence_synced():
-    """
-    On power up or pot ON:
-    - Reset DF
-    - Start DF play immediately (synced with AM)
-    - Fade DF volume up while AM plays
-    - If not confirmed, do a quick second-chance re-trigger
-    """
-    global current_album, current_track
+    # just in case make sure we leave with volume set to where we expect
+    dfp.volume(Config.DFPlayer.VOLUME)
+    return
 
-    df_reset()
-    df_set_vol(0)
+# ****************************************************************************
+# Load Resources
+# ****************************************************************************
+if App.Effects.ENABLE:
+    # micropython.mem_info()
+    print(f"Loading Audio Data: '{Config.Audio.FILE}'")
+    wav = WAV(Config.Audio.PIN, Config.Audio.FILE, Config.Audio.VOLUME, Config.Audio.CARRIER)
+    samps = wav.get_size()
+    rate = wav.get_rate()
+    duration = (1.0 * samps) / (1.0 * rate)
+    rate = rate / 1000
+    print(f"Audio Data: {rate}KHz {samps} samples / {duration:.2f}s" )
+    # micropython.mem_info()
 
-    print("Start sequence (synced): album", current_album, "track", current_track)
+# ****************************************************************************
+# Main Loop
+# ****************************************************************************
+#TODO: Add SDCard removal handling
+def main():
+    global app_state
 
-    confirmed = play_am_and_fade_df_confirming(current_album, current_track)
+    print("")
+    print("*" * 40)
+    print("*" * 40)
+    print("*" * 40)
 
-    if confirmed:
-        note_track_learned(current_album, current_track)
-        save_state("boot start")
-        return
+    print(f"\nBooting Retro Radio Baseline {_VERSION}\n")
 
-    print("No BUSY LOW in confirm window (will second-chance after AM ends).")
-    print("Second-chance: re-trigger DF after AM")
-    df_reset()
-    df_set_vol(DFPLAYER_VOL)
-    df_stop()
-    time.sleep_ms(POST_CMD_GUARD_MS)
-    df_play_folder_track(current_album, current_track)
+    if power_sense.value() == 1:
+        app_state = State.BOOT
+        print("Power Detected")
+        dfp.reset()
 
-    if wait_for_busy_low(1500):
-        print("Second-chance confirmed (BUSY LOW).")
-        note_track_learned(current_album, current_track)
-        save_state("boot start (2nd chance)")
-        return
+    last = None
+    while True:
+        # basic loop logic
+        current = app_state
+        app_state = states[app_state](last)
+        last = current
+        time.sleep_ms(App.Timing.MAIN)
+# main never exits
 
-    print("Second-chance still not confirmed. (Possible BUSY wiring issue or DF not playing.)")
+# ****************************************************************************
+# Cleanup Code
+# ****************************************************************************
+# function called on exit from an exception of from Thonny to shut things down cleanly
+def app_cleanup():
+    if button.is_runnning:
+        button.stop()
+    if wav.is_playing():
+        wav.stop()
+    if dfp.is_online():
+        dfp.disable_reliability()
+        dfp.stop()
+        time.sleep_ms(20)
+        dfp.release()
+ 
 
-# ===========================
-#   Play current + learn
-# ===========================
+# ****************************************************************************
+# Entry Point
+# ****************************************************************************
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt: # this is when Thonny stops the code
+        print("\nStopped by user")
+        if(Config.USE_LED):
+            led.color(Config.LED.DEFAULT)
+        app_cleanup()
+        sys.exit()
 
-def play_current(label=""):
-    global ignore_busy_until, current_album, current_track
-    print("Play request", ("[" + label + "]" if label else ""), "album", current_album, "track", current_track)
-
-    df_stop()
-    time.sleep_ms(POST_CMD_GUARD_MS)
-    df_play_folder_track(current_album, current_track)
-
-    if wait_for_busy_low():
-        print("BUSY went LOW -> playback started")
-        note_track_learned(current_album, current_track)
-        ignore_busy_until = time.ticks_add(time.ticks_ms(), 2000)
-        return True
-
-    print("No BUSY LOW -> not confirmed")
-    return False
-
-# ===========================
-#   Album change helpers (5.9.1 behavior)
-# ===========================
-
-def probe_album_silent(folder, track):
-    """
-    Silent existence probe for an album.
-    No AM playback. Volume forced to 0.
-    Returns True if BUSY goes LOW quickly.
-    """
-    print("Probe album (silent): folder", folder, "track", track)
-    df_set_vol(0)
-    df_stop()
-    time.sleep_ms(POST_CMD_GUARD_MS)
-    df_play_folder_track(folder, track)
-    return wait_for_busy_low(ALBUM_PROBE_MS)
-
-def play_album_change_with_am(label=""):
-    """
-    Used for confirmed album changes.
-    Replays AM WAV and fades in the first track of the folder under it.
-    Returns True if BUSY confirms playback started during the AM window.
-    """
-    global ignore_busy_until, current_album, current_track
-
-    print("Album change request", ("[" + label + "]" if label else ""), "album", current_album, "track", current_track)
-
-    df_set_vol(0)
-    confirmed = play_am_and_fade_df_confirming(current_album, current_track)
-
-    if confirmed:
-        note_track_learned(current_album, current_track)
-        ignore_busy_until = time.ticks_add(time.ticks_ms(), 2000)
-        return True
-
-    print("No BUSY LOW -> not confirmed (during AM album-change window)")
-    return False
-
-# ===========================
-#     MAIN BOOT LOGIC
-# ===========================
-
-print("Booting Retro Radio Baseline 5.9.2")
-
-rc = machine.reset_cause()
-print("Reset cause:", rc)
-
-# Clear album_state only on true power-up reset
-# This is what you want when the RP lost power and was reconnected
-if rc == machine.PWRON_RESET:
-    clear_state_file("PWRON_RESET")
-
-print("Waiting for GP14 HIGH (power sense)...")
-last_hint = time.ticks_ms()
-while power_sense.value() == 0:
-    if time.ticks_diff(time.ticks_ms(), last_hint) > 1500:
-        print("...still waiting for GP14 HIGH")
-        last_hint = time.ticks_ms()
-    time.sleep_ms(20)
-
-print("GP14 HIGH detected.")
-load_state()
-
-print("Giving DFPlayer time to boot:", DF_BOOT_MS, "ms")
-time.sleep_ms(DF_BOOT_MS)
-
-start_sequence_synced()
-
-# ===========================
-#     BUTTON + BUSY LOOP
-# ===========================
-
-print("Button active. tap=next, double=prev, triple=restart album, long=next album")
-
-tap_count = 0
-press_start = 0
-last_button = 1
-last_release_time = 0
-prev_busy = pin_busy.value()
-last_sense = power_sense.value()
-rail2_on = (last_sense == 1)
-
-while True:
-    curr = button.value()
-    now = time.ticks_ms()
-
-    # 1) Button press edge
-    if last_button == 1 and curr == 0:
-        press_start = now
-
-    # 2) Button release edge
-    elif last_button == 0 and curr == 1:
-        press_dur = time.ticks_diff(now, press_start)
-
-        if press_dur >= LONG_PRESS_MS:
-            # Long press -> next album (Option A wrap if missing)
-            print("Long press: request next album")
-            candidate = current_album + 1
-            if candidate > MAX_ALBUM_NUM:
-                candidate = 1
-
-            # Save intent immediately
-            current_album = candidate
-            current_track = 1
-            save_state("long press album change")
-
-            # Probe silently first to avoid double AM when wrapping
-            if probe_album_silent(current_album, current_track):
-                play_album_change_with_am("next album (with AM)")
-            else:
-                print("Album", candidate, "did not confirm. Wrapping to album 1 track 1.")
-                current_album = 1
-                current_track = 1
-                save_state("wrap to album 1 after missing album")
-                play_album_change_with_am("wrapped album 1 (with AM)")
-
-            tap_count = 0
-            last_release_time = 0
-
-        else:
-            tap_count += 1
-            last_release_time = now
-            print("Short tap detected, tap_count =", tap_count)
-
-        time.sleep_ms(40)
-
-    # 3) Decide 1 / 2 / 3 taps after quiet period
-    if tap_count > 0 and time.ticks_diff(now, last_release_time) >= TAP_WINDOW_MS:
-        max_known = KNOWN_TRACKS.get(current_album, max(current_track, 1))
-
-        if tap_count >= 3:
-            current_track = 1
-            save_state("triple tap restart")
-            play_current("restart album")
-
-        elif tap_count == 2:
-            if max_known < 1:
-                max_known = 1
-            current_track -= 1
-            if current_track < 1:
-                current_track = max_known
-            save_state("double tap prev")
-            play_current("previous track")
-
-        else:
-            candidate = current_track + 1
-            if candidate <= max_known:
-                current_track = candidate
-                save_state("single tap next inside known")
-                play_current("next track known")
-            else:
-                current_track = candidate
-                if not play_current("probe new track"):
-                    current_track = 1
-                    save_state("wrap to 1 after silent new track")
-                    play_current("wrap to track 1")
-                else:
-                    save_state("extended known range")
-
-        tap_count = 0
-        last_release_time = 0
-
-    # 4) Detect track finished via BUSY edge (0 -> 1)
-    if rail2_on:
-        b = pin_busy.value()
-        now_ts = time.ticks_ms()
-        if time.ticks_diff(now_ts, ignore_busy_until) >= 0:
-            if prev_busy == 0 and b == 1:
-                max_known = KNOWN_TRACKS.get(current_album, max(current_track, 1))
-                candidate = current_track + 1
-                print("BUSY edge: track finished. Auto advance from", current_track, "->", candidate)
-
-                if candidate <= max_known:
-                    current_track = candidate
-                    save_state("auto next inside known")
-                    play_current("auto next known")
-                else:
-                    current_track = candidate
-                    if not play_current("auto probe new track"):
-                        current_track = 1
-                        save_state("auto wrap to 1")
-                        play_current("auto wrap to track 1")
-                    else:
-                        save_state("auto extended known range")
-
-        prev_busy = b
-
-    # 5) Watch power sense line for pot OFF / ON
-    sense = power_sense.value()
-    if sense != last_sense:
-        if sense == 0:
-            print("GP14 LOW - Rail 2 power OFF (pot turned OFF)")
-            rail2_on = False
-            save_state("pot turned off")
-            df_stop()
-        else:
-            print("GP14 HIGH - Rail 2 power ON (pot turned ON)")
-            rail2_on = True
-            save_state("pot turned back on")
-            print("Giving DFPlayer time to boot:", DF_BOOT_MS, "ms")
-            time.sleep_ms(DF_BOOT_MS)
-            start_sequence_synced()
-        last_sense = sense
-
-    last_button = curr
-    time.sleep_ms(10)
+    except Exception as e:
+        print("\nError: %s" % e)
+        if(Config.USE_LED):
+            led.color(App.Colors.ERROR)
+        app_cleanup()
+        print("Waiting for power off to reset")
+        while power_sense.value() == 1:
+            time.sleep_ms(20)
+        print("resetting in 1 second")
+        time.sleep_ms(1000)
+        if(Config.USE_LED):
+            led.color(App.Colors.WARNING)
+        machine.soft_reset() # software only reset
+        # machine.reset()    # hard reset
+        # raise
