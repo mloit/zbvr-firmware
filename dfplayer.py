@@ -4,18 +4,22 @@
 #         About: Baseline firmware for the Zion Brock Vintage Radio 
 #
 #          File: dfplayer.py
-#       Version: 26.0.1 Alpha
+#       Version: 26.0.1
 #   Description: Full implementation of the serial protocol used by the
 #                DFPlayer from DFRobot. Largely modelled after the Arduino/CPP
 #                library implementation published by DFRobot
 # 
 #        Author: Mark Loit
-#        Credit: Zion Brock
+#        Credit: Zion Brock (Original code and inspiration)
 #
 #       License: CC BY-NC-SA
 # 
 #  (c) Copyright 2026 Mark Loit. All Rights Reserved.
 # ****************************************************************************
+
+# TODO:
+#  - Create custom exceptions and ge rid of the generic OSErrors
+#  - Add timeouts for responses so we don't wait forever
 
 from machine import UART, Pin
 import time, micropython, machine
@@ -299,7 +303,7 @@ class DFPlayer:
             except:
                 val = None
             
-            if val != None:
+            if not (val is None):
                 self._rxd.put(val[0])
 
         micropython.schedule(self._packet_processor, None)
@@ -794,7 +798,11 @@ class DFPlayer:
         self._status = DFstatus.PLAYING
 
     # play track (001-255) in folder (00-99) (3.6.5)
-    def play_folder_track(self, folder, track):
+    # note setting Large=True is the same as calling play_large_folder_track()
+    def play_folder_track(self, folder, track, large=False):
+        if large:
+            return self.play_large_folder_track(folder, track)
+
         self._print(f"DF: play_folder_track({folder:02d}, {track:03d})")
 
         combined = ((folder & 0x00ff) << 8) + (track & 0x00ff)

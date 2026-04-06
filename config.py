@@ -4,11 +4,11 @@
 #         About: Baseline firmware for the Zion Brock Vintage Radio 
 #
 #          File: config.py
-#       Version: 26.0.1 Alpha
+#       Version: 26.0.1
 #   Description: Configuration settings for the main firmware application
 # 
 #        Author: Mark Loit
-#        Credit: Zion Brock
+#        Credit: Zion Brock (Original code and inspiration)
 #
 #       License: CC BY-NC-SA
 # 
@@ -30,7 +30,13 @@ class App:
 
         # Once the last track of an album has played, the defult behaviour (False) is to restart the same album
         # setting this option to true will cause it to advance to the next album
-        CYCLE_ALBUMS     = False 
+        CYCLE_ALBUMS     = False
+
+        # Randomize playback of tracks within an album
+        TRACK_RANDOMIZE = False
+
+        # Randomize playback of tracks within an album
+        ALBUM_RANDOMIZE = False
 
     class Effects:
         # enables the use of the PWM Audio module,
@@ -106,7 +112,7 @@ class Config:
         VOLUME        = 1.0       # WAV playback volume (0.0-1.0)
         CARRIER       = 125_000   # PWM carrier frequency in Hz
         FILE          = "AMradioSound.wav"  # WAV file to play (relative to project root)
-        FADE_IN       = 0         # Wav fade-in at start of playback (seconds)
+        FADE_IN       = 0.8       # Wav fade-in at start of playback (seconds)
         FADE_OUT      = 0.8       # WAV fade-out at end of playback (seconds)
 
 # DFPlayer SPecific settings
@@ -125,5 +131,5 @@ class Config:
                                   #     4: Classical
                                   #     5: Bass
 
-        FADE          = 2.4       # Volume fade-in duration (seconds)
-        FADE_STEPS    = 20        # number of fade-in steps
+        FADE          = 2.0       # Volume fade-in/fade-out duration (seconds)
+        FADE_STEPS    = 20        # number of fade steps

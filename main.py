@@ -8,7 +8,7 @@
 #   Description: main application logic for the Vintage Radio Firmware
 # 
 #        Author: Mark Loit
-#        Credit: Zion Brock
+#        Credit: Zion Brock (Original code and inspiration)
 #
 #       License: CC BY-NC-SA
 # 
@@ -29,20 +29,31 @@
 # - converted the main loop into a state machine
 # - added exception handling to main, to clean up nicely on a crash or when Thonny stops the program
 # - added handling of live SD card removal and insertion
+# - added ability to change the equalizer setting
+# - WAV playback can now fade in and out for softer edge transitions
+# - Album change can now fade out & back in with the WAV playback for a smoother transition
+# - added support for large folders (4 digit filename). Folders with 1000 tracks or more can only be
+#   in the range of 01-15. The folder must have more than 1000 tracks for the code to automatically
+#   switch to using 4 digit names.
+# - Added support for track and album randomization
 
-# Known issues with ALPHA
+# Known issues:
 # - if there is a gap in folder names, some folders after the gaps may be mised
-#   -- solution, either scan for all 99 possibilities (slow), or make the caviat that foldernames cannot
+#   -- solution, either scan for all 99 possibilities (slow), or make the caviat that folder names cannot
 #      be skipped, but folders can be left empty (easier)
+# -  turning pot off durong AM playback can cause the code to hang
+#   -- need timeouts on the comms with the DFPlayer so we don't wait forever
 
-_VERSION = "26.0.1 ALPHA4"
+_VERSION = "26.0.1 ALPHA5"
 
 import micropython
 micropython.opt_level(3) # comment out this line when debugging
-micropython.alloc_emergency_exception_buf(100)
+micropython.alloc_emergency_exception_buf(400)
 
 from machine import Pin, I2C
 import time, sys, machine
+
+print(f"starting ticks {time.ticks_ms()}")
 
 from config import App, Config
 from led import LED
@@ -92,11 +103,14 @@ if(Config.USE_I2C):
 # ****************************************************************************
 # Playlist Handling
 # ****************************************************************************
-playlist = Playlist()
+playlist = Playlist(advance_floder = App.Playlist.CYCLE_ALBUMS, 
+                    shuffle_albums = App.Playlist.ALBUM_RANDOMIZE, 
+                    shuffle_tracks = App.Playlist.TRACK_RANDOMIZE)
 
 restore_playlist = False
 playlist_restore_idx = -1
 playlist_restore_trk = 0
+playlist_restore_seed = 0
 
 # Dynamically determines the playlist from the contents of the SD 
 def generate_playlist(folders = -1):
@@ -118,8 +132,9 @@ def generate_playlist(folders = -1):
         else:
             print(".",end="")
     print("")
+    playlist.freeze()
 
-    albums = playlist.albums()
+    albums = playlist.get_albums()
     print("playlist contains", albums, "albums")
     pl = playlist.all()
     for entry in pl:
@@ -131,6 +146,7 @@ def generate_playlist(folders = -1):
 #state machine constants
 class State:
     IDLE        = 0  # Idle state, Potentiometer in off poosition (Next: POWER_UP)
+    WARM_BOOT   = 1  # power was on, send a reset to the DFPlayer
     BOOT        = 2  # Potentiometer just turned on Wait for DFPlayer to boot (Next: START_UP)
     MEDIA_CHECK = 3  # Check and wait for SD Card
     START_UP    = 5  # Initialize playlist, start first track
@@ -174,6 +190,24 @@ def app_idle(last):
     return State.IDLE
 
 states[State.IDLE] = app_idle
+
+# ****************************************************************************
+# power was already on, send reset, advance to boot
+def app_warm_boot(last):
+    if(last != State.BOOT):
+        print("Waiting for DFPlayer to come online")
+        if(Config.USE_LED):
+            led.color(App.Colors.WAITING)
+    if power_sense.value() == 0:
+        print("Power Off Detected")
+        return State.POWER_DN
+    if dfp.is_online():
+        print("DFPlayer online, ready to proceed")
+        return State.MEDIA_CHECK
+    
+    return State.BOOT
+
+states[State.BOOT] = app_warm_boot
 
 # ****************************************************************************
 # power was turned on, wait for DFPlayer to boot. 
@@ -241,7 +275,7 @@ states[State.MEDIA_CHECK] = app_media_check
 # button handler set-up on exit
 # non looping, one pass, and it advances
 def app_start_up(last):
-    global restore_playlist, playlist_restore_idx, playlist_restore_trk
+    global restore_playlist, playlist_state
 
     if power_sense.value() == 0:
         print("Power Off Detected")
@@ -258,14 +292,13 @@ def app_start_up(last):
     generate_playlist(folders)
 
     # no point in continuing if there are no music files
-    if playlist.albums() == 0:
+    if playlist.is_empty():
         print("No albums or tracks found... Exiting")
         raise OSError("No Music Found")
     
     # If this is a warm power-up, we can optionally continue where we left-off
     if App.Playlist.PRESEVE and restore_playlist:
-        playlist.set_index(playlist_restore_idx)
-        playlist.set_track(playlist_restore_trk)
+        playlist.set_state(playlist_state)
     restore_playlist = False
     
     print("\n" + "*" * 40 + "\n")
@@ -275,13 +308,14 @@ def app_start_up(last):
  
     # start by playing the first album & track, with AM radio effect
     album, track = playlist.current()
+    large = playlist.is_large_album()
 
     print(f"Now Playing: Album {album:02d} Track {track:03d}")
 
     if App.Effects.ENABLE and App.Effects.ON_START:
-        fade_and_play_effect(album, track)
+        fade_and_play_effect(album, track, large=large)
     else:
-        dfp.play_folder_track(album, track)
+        dfp.play_folder_track(album, track, large=large)
 
     button.start() # start the button monitor 
 
@@ -301,15 +335,20 @@ def app_play(last):
         print("Power Off Detected")
         return State.POWER_DN
 
+    # album, track = playlist.current()
     # any button press event will result in a change of tracks
-    if button.has_event():
-        dfp.stop()
+    # we leave the current one playing though
+    # if button.has_event():
+    #     print(f"Album {album:02d} Track {track:03d} playback stopped") # technically not yet, but soon
+    #     return State.PLAY_NEXT
 
+    # check if playback stopped naturally
     if (not dfp.is_playing()) or button.has_event():
         album, track = playlist.current()
         if button.has_event():
-            dfp.stop()
-            print(f"Album {album:02d} Track {track:03d} playback stopped")
+            # dfp.stop() # stop now happens in the cross-fade to the new album (or in the following states)
+            print(f"Album {album:02d} Track {track:03d} playback stopped") # technically not yet, but soon
+            return State.PLAY_NEXT
         else:
             print(f"Album {album:02d} Track {track:03d} playback complete")
         if(Config.USE_LED):
@@ -335,25 +374,36 @@ def app_next(last):
     if button.has_event():
         evt = button.get_event()
 
+    # check for Long Press first, we don't want the stop and pause effect
+    # of a normal transition, so we can fade out and in with the AM Radio sound
     if evt == Controls.Event.LONG: # next album
         print(" -- Long button press detected: Next Album")
         album, track = playlist.next_album()
         print(f"Changing to: Album {album:02d} Track {track:03d}")
         return State.NEXT_ALBUM
-    elif evt == Controls.Event.TRIPLE: # restart album
+    
+    # check that we got here by a button press, if so emulate 
+    # a normal transition
+    if evt != Controls.Event.NONE:
+        dfp.stop()
+        if(Config.USE_LED):
+            led.color(App.Colors.IDLE)
+        app_wait(App.Timing.GUARD)
+
+    if evt == Controls.Event.TRIPLE: # restart album
         print(" -- Triple button press detected: Restarting Album")
         playlist.restart_album()
         album, track = playlist.current()
     elif evt == Controls.Event.DOUBLE: # previous track
         print(" -- Double button press detected: Previous Track")
-        album, track = playlist.previous_track(App.Playlist.CYCLE_ALBUMS)
+        album, track = playlist.previous_track()
     else: # normal advance, or single press for next track
         if evt == Controls.Event.SINGLE:
             print(" -- Single button press detected: Next Track")
-        album, track = playlist.next_track(App.Playlist.CYCLE_ALBUMS)
+        album, track = playlist.next_track()
 
     print(f"Now Playing: Album {album:02d} Track {track:03d}")
-    dfp.play_folder_track(album,track)
+    dfp.play_folder_track(album,track, large=playlist.is_large_album())
 
     return State.PLAY_TRACK
 
@@ -372,13 +422,20 @@ def app_next_album(last):
 
     # start by playing the first album & track, with AM radio effect
     album, track = playlist.current()
+    large = playlist.is_large_album()
 
     print(f"Now Playing: Album {album:02d} Track {track:03d}")
 
     if App.Effects.ENABLE and App.Effects.ON_ALBUM:
-        fade_and_play_effect(album, track)
+        fade_and_play_effect(album, track, large=large)
     else:
-        dfp.play_folder_track(album, track)
+        # no transition effect, emulate a normal transition
+        dfp.stop()
+        if(Config.USE_LED):
+            led.color(App.Colors.IDLE)
+        app_wait(App.Timing.GUARD)
+
+        dfp.play_folder_track(album, track, large=large)
     
     return State.PLAY_TRACK
 states[State.NEXT_ALBUM] = app_next_album
@@ -391,7 +448,7 @@ states[State.NEXT_ALBUM] = app_next_album
 # disable button handler
 # non looping, one pass, and it advances
 def app_power_down(last):
-    global restore_playlist, playlist_restore_idx, playlist_restore_trk
+    global restore_playlist, playlist_state
 
     if(last == State.POWER_DN):
         return State.IDLE
@@ -408,8 +465,7 @@ def app_power_down(last):
     # in case SDCard was removed when we power-down, don't try to overwrite the existing saved state
     if not restore_playlist:
         restore_playlist = True
-        playlist_restore_idx = playlist.get_index()
-        playlist_restore_trk = playlist.get_track()
+        playlist_state = playlist.get_state()
         playlist.clear()
 
     print("Power-Down")
@@ -423,7 +479,7 @@ states[State.POWER_DN] = app_power_down
 # stop button
 # wait for re-insertion
 def app_media_wait(last):
-    global restore_playlist, playlist_restore_idx, playlist_restore_trk
+    global restore_playlist, playlist_state
 
     if power_sense.value() == 0:
         print("Power Off Detected")
@@ -433,10 +489,9 @@ def app_media_wait(last):
         button.stop()
 
         restore_playlist = True
-        playlist_restore_idx = playlist.get_index()
-        playlist_restore_trk = playlist.get_track()
+        playlist_state = playlist.get_state()
         playlist.clear()
-
+        
         print("SDCard was removed, waiting for SDCard")
         if(Config.USE_LED):
             led.color(App.Colors.WAITING)
@@ -469,7 +524,7 @@ states[State.MEDIA_WAIT] = app_media_wait
 # restart button
 # resume playing
 def app_media_load(last):
-    global restore_playlist, playlist_restore_idx, playlist_restore_trk
+    global restore_playlist, playlist_state
 
     if power_sense.value() == 0:
         print("Power Off Detected")
@@ -486,14 +541,13 @@ def app_media_load(last):
     generate_playlist(folders)
 
     # no point in continuing if there are no music files
-    if playlist.albums() == 0:
+    if playlist.get_albums() == 0:
         print("No albums or tracks found... Exiting")
         raise OSError("No Music Found")
     
     # If this is a warm power-up, we can optionally continue where we left-off
     if App.Playlist.PRESEVE and restore_playlist:
-        playlist.set_index(playlist_restore_idx)
-        playlist.set_track(playlist_restore_trk)
+        playlist.set_state(playlist_state)
     restore_playlist = False
     
     # start by playing the first album & track, with AM radio effect
@@ -503,7 +557,7 @@ def app_media_load(last):
 
     dfp.volume(Config.DFPlayer.VOLUME)
 
-    dfp.play_folder_track(album, track)
+    dfp.play_folder_track(album, track, large=playlist.is_large_album())
 
     button.start() # start the button monitor 
 
@@ -514,67 +568,95 @@ states[State.MEDIA_LOAD] = app_media_load
 # ****************************************************************************
 # AM Radio Effect Playback
 # ****************************************************************************
-def fade_and_play_effect(folder, track):
-    if not dfp.is_stopped():
-        dfp.stop()
-
-    # start playing the new track
-    dfp.volume(0)
-    try:
-        dfp.play_folder_track(folder, track)
-    except:
-        print(f"unable to start Album {folder:02d} Track {track:03d}")
-        dfp.volume(Config.DFPlayer.VOLUME) # exit with volume set to expected state
-        raise
+def fade_and_play_effect(folder, track, large=False):
 
     if(Config.USE_LED):
         led.color(App.Colors.PLAYING_WAV)
 
-    print(f"PWM Audio: starting  '{Config.Audio.FILE}'")
-    wav.play(fade_out=Config.Audio.FADE_OUT)
 
-    fade_steps = Config.DFPlayer.FADE_STEPS
-    fade_delay = int((Config.DFPlayer.FADE * 1000) / fade_steps)
+    print(f"PWM Audio: starting  '{Config.Audio.FILE}'")
+    wav.play(fade_in=Config.Audio.FADE_IN, fade_out=Config.Audio.FADE_OUT)
+
+    # doesn't make sense to have more steps than actual adjustment resolution
+    fade_steps = min(30, min(Config.DFPlayer.FADE_STEPS, Config.DFPlayer.VOLUME))
+    fade_delay = int((Config.DFPlayer.FADE * 1000) / (fade_steps - 1))
+    play_vol = min(30, Config.DFPlayer.VOLUME)
+
     if fade_delay < 40:
+        #print("Fade delay below limit")
         fade_delay = 40
 
-    try:
-        vol = 0
-        print(f"Fade-In Volume [{vol} ", end="")
-        for step in range(fade_steps + 1):
-            vol = int((step / fade_steps) * Config.DFPlayer.VOLUME)
-            print(">", end="")
-            dfp.volume(vol)
+    # print(f"Fade Debug: Time: {(Config.DFPlayer.FADE * 1000)}ms Delay: {fade_delay}ms steps: {fade_steps}")
+
+    # t_stop_out = 0
+    if not dfp.is_stopped(): # track is currently playing, fade it out, then stop
+        # fade out the old track
+        try:
+            vol = play_vol
+            #print(f"Fade-Out Volume [{vol} ", end="")
 
             t_start = time.ticks_ms()
-            while time.ticks_diff(time.ticks_ms(), t_start) < fade_delay:
-                if not wav.is_playing():
-                    break
-                app_wait(10)
-        
-            if not wav.is_playing():
-                break
-        print(f" {vol}]")
+            for step in range(fade_steps):
+                vol = play_vol - int((play_vol / fade_steps) * step)
+                #print(">", end="")
+                dfp.volume(vol)
+
+                t_next = fade_delay * step
+                while time.ticks_diff(time.ticks_ms(), t_start) < t_next:
+                    app_wait(App.Timing.MAIN)
+            #print(f" {vol}]")
+            # t_stop_out = time.ticks_diff(time.ticks_ms(), t_start)
+
+        except OSError:
+            print(" DFPlayer stopped unexpectedly")
+            wav.stop()
+            return
+        finally:
+            dfp.volume(0)
+            if not dfp.is_stopped():
+                dfp.stop()
+
+    # start playing the new track
+    try:
+        dfp.play_folder_track(folder, track, large=large)
+    except:
+        print(f"unable to start Album {folder:02d} Track {track:03d}")
+        dfp.volume(play_vol) # exit with volume set to expected state
+        raise
+
+    # fade in the new track
+    try:
+        vol = 0
+        #print(f"Fade-In Volume [{vol} ", end="")
+        t_start = time.ticks_ms()
+        for step in range(fade_steps):
+            vol = int((play_vol / fade_steps) * step)
+            #print(">", end="")
+            dfp.volume(vol)
+
+            t_next = fade_delay * step
+            while time.ticks_diff(time.ticks_ms(), t_start) < t_next:
+                app_wait(App.Timing.MAIN)
+        #print(f" {vol}]")
+        # t_stop_in = time.ticks_diff(time.ticks_ms(), t_start)
 
         while wav.is_playing():
-            app_wait(20)
+            app_wait(App.Timing.MAIN)
+
     except OSError:
         print(" DFPlayer stopped unexpectedly")
         wav.stop()
         return
     finally:
+        dfp.volume(play_vol)
         wav.stop()
+
+    # print(f"Actual Fade Times: Out: {t_stop_out}ms In: {t_stop_in}ms")
 
     if(Config.USE_LED):
         led.color(App.Colors.PLAYING_SONG)
     print(f"PWM Audio: '{Config.Audio.FILE}' playback complete")
 
-    # just in case make sure we leave with volume set to where we expect
-    try:
-        dfp.volume(Config.DFPlayer.VOLUME)
-    except: # we should only get here if the SD  card was removed
-        print("Warning: DFPlayer stopped unexpectedly")
-    return
 
 # ****************************************************************************
 # Load Resources
