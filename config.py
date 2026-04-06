@@ -131,5 +131,11 @@ class Config:
                                   #     4: Classical
                                   #     5: Bass
 
-        FADE          = 2.0       # Volume fade-in/fade-out duration (seconds)
-        FADE_STEPS    = 20        # number of fade steps
+        # the total time for fade-in and fade_out should be at least 0.5s 
+        # less than the playtime of the WAV file. (default WAV is 4.7s)
+        # steps seems to be best around 20, but may need to be adjusted lower
+        # if the time gets shorter than  about 1.5s
+        FADE_IN       = 2.0       # Volume fade-in duration (seconds)
+        STEPS_IN      = 20        # number of fade-in steps
+        FADE_OUT      = 2.0       # Volume fade-out duration (seconds)
+        STEPS_OUT     = 20        # number of fade-out steps

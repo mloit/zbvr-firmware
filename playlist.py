@@ -25,6 +25,9 @@ print("Loading Module: Playlist")
 ALBUM_ID  = 0
 TRACKS    = 1
 
+# max number of files before it's considered a large folder
+FOLDER_THRESHOLD = 255
+
 # ****************************************************************************
 # Playlist class
 # ****************************************************************************
@@ -60,12 +63,12 @@ class Playlist:
     # perform the Fisher-Yates Shuffle
     def _do_shuffle(self, deck):
         end = len(deck) - 1
-        print(f"Shuffle({end+1}) ", end="")
+        # print(f"Shuffle({end+1}) ", end="")
         for idx in range(0, end): # loop from 0 to end - 1 (always need at least 2 cells)
-            print(".", end="")
+            # print(".", end="")
             swap = random.randint(idx, end) # swap index is random from index to end
             deck[idx], deck[swap] = deck[swap], deck[idx] # swap index with the randomly selected cell
-        print("", deck)
+        # print("", deck)
         return deck
 
     # creates the shufle list for albumes. Previous state will be overwritten
@@ -297,8 +300,8 @@ class Playlist:
     def is_empty(self):
         return (len(self.playlist) == 0)
 
-    # returns true if the current album has mmore than 999 tracks 
+    # returns true if the current album has more tracks than the threshold
     def is_large_album(self):
         if self.is_empty():
             raise OSError("Playlist: List is empty")
-        return (999 < self.playlist[self._state.album][TRACKS])
+        return (FOLDER_THRESHOLD < self.playlist[self._state.album][TRACKS])

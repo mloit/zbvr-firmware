@@ -32,8 +32,8 @@
 # - added ability to change the equalizer setting
 # - WAV playback can now fade in and out for softer edge transitions
 # - Album change can now fade out & back in with the WAV playback for a smoother transition
-# - added support for large folders (4 digit filename). Folders with 1000 tracks or more can only be
-#   in the range of 01-15. The folder must have more than 1000 tracks for the code to automatically
+# - added support fort large folders (4 digit filename). Folders with 256 tracks or more can only be
+#   in the range of 01-15. The folder must have more than 255 tracks for the code to automatically
 #   switch to using 4 digit names.
 # - Added support for track and album randomization
 
@@ -41,10 +41,10 @@
 # - if there is a gap in folder names, some folders after the gaps may be mised
 #   -- solution, either scan for all 99 possibilities (slow), or make the caviat that folder names cannot
 #      be skipped, but folders can be left empty (easier)
-# -  turning pot off durong AM playback can cause the code to hang
+# -  turning pot off during AM playback can cause the code to hang
 #   -- need timeouts on the comms with the DFPlayer so we don't wait forever
 
-_VERSION = "26.0.1 ALPHA5"
+_VERSION = "26.0.1 ALPHA6"
 
 import micropython
 micropython.opt_level(3) # comment out this line when debugging
@@ -128,6 +128,9 @@ def generate_playlist(folders = -1):
         files = dfp.get_file_count(dir + 1)
         if files:
             print("+", end="")
+            if files >= 256: # for some reason the DFPlayer reports double the files when there are 256 or more
+                files //= 2  # adjust the count back to the actual number
+
             playlist.add(dir+1, files)
         else:
             print(".",end="")
@@ -578,13 +581,11 @@ def fade_and_play_effect(folder, track, large=False):
     wav.play(fade_in=Config.Audio.FADE_IN, fade_out=Config.Audio.FADE_OUT)
 
     # doesn't make sense to have more steps than actual adjustment resolution
-    fade_steps = min(30, min(Config.DFPlayer.FADE_STEPS, Config.DFPlayer.VOLUME))
-    fade_delay = int((Config.DFPlayer.FADE * 1000) / (fade_steps - 1))
+    fade_in_steps  = min(30, min(Config.DFPlayer.STEPS_IN, Config.DFPlayer.VOLUME)) # max of 30 steps
+    fade_out_steps = min(30, min(Config.DFPlayer.STEPS_OUT, Config.DFPlayer.VOLUME))
+    fade_in_delay  = max(int((Config.DFPlayer.FADE_IN * 1000) / (fade_in_steps - 1)), 40) # min of 40ms
+    fade_out_delay = max(int((Config.DFPlayer.FADE_OUT * 1000) / (fade_out_steps - 1)), 40)
     play_vol = min(30, Config.DFPlayer.VOLUME)
-
-    if fade_delay < 40:
-        #print("Fade delay below limit")
-        fade_delay = 40
 
     # print(f"Fade Debug: Time: {(Config.DFPlayer.FADE * 1000)}ms Delay: {fade_delay}ms steps: {fade_steps}")
 
@@ -596,12 +597,12 @@ def fade_and_play_effect(folder, track, large=False):
             #print(f"Fade-Out Volume [{vol} ", end="")
 
             t_start = time.ticks_ms()
-            for step in range(fade_steps):
-                vol = play_vol - int((play_vol / fade_steps) * step)
+            for step in range(fade_out_steps):
+                vol = play_vol - int((play_vol / fade_out_steps) * step)
                 #print(">", end="")
                 dfp.volume(vol)
 
-                t_next = fade_delay * step
+                t_next = fade_out_delay * step
                 while time.ticks_diff(time.ticks_ms(), t_start) < t_next:
                     app_wait(App.Timing.MAIN)
             #print(f" {vol}]")
@@ -629,12 +630,12 @@ def fade_and_play_effect(folder, track, large=False):
         vol = 0
         #print(f"Fade-In Volume [{vol} ", end="")
         t_start = time.ticks_ms()
-        for step in range(fade_steps):
-            vol = int((play_vol / fade_steps) * step)
+        for step in range(fade_in_steps):
+            vol = int((play_vol / fade_in_steps) * step)
             #print(">", end="")
             dfp.volume(vol)
 
-            t_next = fade_delay * step
+            t_next = fade_in_delay * step
             while time.ticks_diff(time.ticks_ms(), t_start) < t_next:
                 app_wait(App.Timing.MAIN)
         #print(f" {vol}]")
