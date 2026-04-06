@@ -1,9 +1,11 @@
-# Baseline 5.9.1 - Retro Radio (synced AM + DF fade, stable resume, album-change replays AM)
-# Option A: if next album (long-press) does not exist / does not confirm BUSY, wrap to Album 1 Track 1
-# Fix in 5.9.1: avoid double AM when wrapping after a missing album by probing silently first
+# Baseline 5.9.2 - Retro Radio
+# Change: Clear album_state.txt only after a true RP2040 power cycle (PWRON_RESET)
+# Goal: If the RP loses power and comes back, start fresh with no stale learned state
+# Note: Thonny "MPY: soft reboot" will NOT clear state
 
 from machine import Pin, PWM, Timer, UART
 import neopixel, ustruct, time
+import machine, os
 
 # ===========================
 #      CONFIGURATION
@@ -14,7 +16,7 @@ PIN_BUTTON      = 2
 PIN_NEOPIX      = 16
 PIN_UART_TX     = 0
 PIN_UART_RX     = 1
-PIN_SENSE       = 14      # power sense from Rail 2
+PIN_SENSE       = 14      # power sense from Rail 2 (pot)
 PIN_BUSY        = 15      # DFPlayer BUSY (0 = playing, 1 = idle)
 
 VOLUME          = 1.0
@@ -99,6 +101,19 @@ def df_stop():
 # ===========================
 #   Album state save / load
 # ===========================
+
+def clear_state_file(reason=""):
+    global current_album, current_track, KNOWN_TRACKS
+    try:
+        if ALBUM_FILE in os.listdir("/"):
+            os.remove("/" + ALBUM_FILE)
+            print("Cleared album_state.txt", ("[" + reason + "]" if reason else ""))
+    except Exception as e:
+        print("State clear error:", e)
+
+    current_album = 1
+    current_track = 1
+    KNOWN_TRACKS = {}
 
 def load_state():
     global current_album, current_track, KNOWN_TRACKS
@@ -274,7 +289,7 @@ def play_am_and_fade_df_confirming(folder, track):
 
             t_start = time.ticks_ms()
             while time.ticks_diff(time.ticks_ms(), t_start) < fade_delay:
-                if (not confirmed) and (time.ticks_diff(time.ticks_ms(), confirm_deadline) <= 0):
+                if (not confirmed) and (time.ticks_diff(time.ticks_ms(), confirm_deadline) >= 0):
                     if pin_busy.value() == 0:
                         confirmed = True
                         print("BUSY went LOW -> playback started (confirmed during AM)")
@@ -286,7 +301,7 @@ def play_am_and_fade_df_confirming(folder, track):
                 break
 
         while not state["done"]:
-            if (not confirmed) and (time.ticks_diff(time.ticks_ms(), confirm_deadline) <= 0):
+            if (not confirmed) and (time.ticks_diff(time.ticks_ms(), confirm_deadline) >= 0):
                 if pin_busy.value() == 0:
                     confirmed = True
                     print("BUSY went LOW -> playback started (confirmed during AM)")
@@ -371,7 +386,7 @@ def play_current(label=""):
     return False
 
 # ===========================
-#   Album change helpers (5.9.1)
+#   Album change helpers (5.9.1 behavior)
 # ===========================
 
 def probe_album_silent(folder, track):
@@ -412,7 +427,15 @@ def play_album_change_with_am(label=""):
 #     MAIN BOOT LOGIC
 # ===========================
 
-print("Booting Retro Radio Baseline 5.9.1")
+print("Booting Retro Radio Baseline 5.9.2")
+
+rc = machine.reset_cause()
+print("Reset cause:", rc)
+
+# Clear album_state only on true power-up reset
+# This is what you want when the RP lost power and was reconnected
+if rc == machine.PWRON_RESET:
+    clear_state_file("PWRON_RESET")
 
 print("Waiting for GP14 HIGH (power sense)...")
 last_hint = time.ticks_ms()
@@ -468,13 +491,10 @@ while True:
             current_track = 1
             save_state("long press album change")
 
-            # 5.9.1 behavior:
-            # Probe silently first to avoid double AM when wrapping.
+            # Probe silently first to avoid double AM when wrapping
             if probe_album_silent(current_album, current_track):
-                # Candidate exists, now do the full AM + fade experience (this restarts track 1)
                 play_album_change_with_am("next album (with AM)")
             else:
-                # Candidate missing, wrap and only play AM once for album 1
                 print("Album", candidate, "did not confirm. Wrapping to album 1 track 1.")
                 current_album = 1
                 current_track = 1
