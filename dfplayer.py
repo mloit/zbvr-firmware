@@ -189,6 +189,16 @@ DFequalizer_strings = {
     5: "Bass"       # Bass optimized Eq
 }
 
+# class DFProtocolErrorException(Exception):
+#     """Raised when an error is received back"""
+
+#     def __init__(self, error, message):
+#         self.errno = error
+#         self.message = f"DFPlayer: "
+#         super().__init__(self.message)
+
+
+
 # ****************************************************************************
 # Protocol Constants
 # ****************************************************************************
@@ -254,12 +264,13 @@ class DFPlayer:
 
         # initialize other state variables
         self._online = False
+        self._no_media = True
         self._storage = DFstorage.NONE
         self._status = DFstatus.STOPPED
 
         self._wait_ack = False     # flag for when a command is waiting for an acknowledge
         self._waiting = False      # indicates a query call is waiting for a response
-        self._query = DFcmd.NONE  # command that made the query call
+        self._query = DFcmd.NONE   # command that made the query call
 
         # initialize the UART
         self._uart = UART(uart, tx=Pin(tx), rx=Pin(rx), baudrate=_DF_BAUD)
@@ -285,9 +296,11 @@ class DFPlayer:
                 break
             try:
                 val = uart.read(1)
+            except:
+                val = None
+            
+            if val != None:
                 self._rxd.put(val[0])
-            except OSError:
-                pass
 
         micropython.schedule(self._packet_processor, None)
 
@@ -298,6 +311,8 @@ class DFPlayer:
         self._print("Boot message received")
         self._print("Detected Storage:", DFstorage_strings[sto & _STORAGE_MASK])
         self._online = True
+        if((sto & DFstorage.SDC) != 0):
+            self._no_media = False
         self._storage = sto
 
     def _handle_error(self, errno):
@@ -333,14 +348,16 @@ class DFPlayer:
         self._print("Mount message received")
         self._print("Detected Storage:", DFstorage_strings[sto & _STORAGE_MASK])
         self._storage |= sto
-        self._online = True
+        if((sto & DFstorage.SDC) != 0):
+            self._no_media = False
 
     def _handle_unmount(self, sto):
         self._print("Unnount message received")
         self._print("Removed Storage:", DFstorage_strings[sto & _STORAGE_MASK])
         self._storage &= ~sto
-        self._status = DFstatus.STOPPED
-        self._online = False
+        if((sto & DFstorage.SDC) != 0):
+            self._no_media = True
+            self._status = DFstatus.STOPPED
     
     def _handle_play_stop(self, cmd, par_hi, par_lo):
         par16 = (par_hi << 8) + par_lo
@@ -494,14 +511,14 @@ class DFPlayer:
 
     # sends a command without waiting
     def _send_command(self, cmd, arg = 0, wait = False):
-        if not self._online:
+        if (not self._online) or (self._no_media):
             raise OSError("DFPlayer not online")
         
         self._send_frame(cmd, arg=arg, wait=wait)
 
     # sends a command, waits for the acknowledgement
     def _send_command_confirmed(self, cmd, arg = 0):
-        if not self._online:
+        if (not self._online) or (self._no_media):
             raise OSError("DFPlayer not online")
         
         # note only confirms if _use_ack is True
@@ -521,7 +538,7 @@ class DFPlayer:
 
     # sends a query, and waits for a response
     def _send_query(self, cmd, arg = 0):
-        if not self._online:
+        if (not self._online) or (self._no_media):
             raise OSError("DFPlayer not online")
         
         self._waiting = True
@@ -996,6 +1013,7 @@ class DFPlayer:
     # clears and resets any state
     def set_offline(self):
         self._online = False
+        self._no_media = True
         self._storage = DFstorage.NONE
         self._status = DFstatus.STOPPED
         self._waiting = False

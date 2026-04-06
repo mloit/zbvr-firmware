@@ -35,7 +35,7 @@
 #   -- solution, either scan for all 99 possibilities (slow), or make the caviat that foldernames cannot
 #      be skipped, but folders can be left empty (easier)
 
-_VERSION = "26.0.1 ALPHA3"
+_VERSION = "26.0.1 ALPHA4"
 
 import micropython
 micropython.opt_level(3) # comment out this line when debugging
@@ -47,7 +47,7 @@ import time, sys, machine
 from config import App, Config
 from led import LED
 from audioplayer import WAV
-from dfplayer import DFPlayer
+from dfplayer import DFPlayer, DFequalizer_strings, DFequalizer
 from controls import Controls
 from playlist import Playlist
 
@@ -269,6 +269,9 @@ def app_start_up(last):
     restore_playlist = False
     
     print("\n" + "*" * 40 + "\n")
+
+    dfp.equalizer(Config.DFPlayer.EQUALIZER)
+    print("Equalizer Setting:", DFequalizer_strings[dfp.get_equalizer()])
  
     # start by playing the first album & track, with AM radio effect
     album, track = playlist.current()
@@ -556,7 +559,7 @@ def fade_and_play_effect(folder, track):
         while wav.is_playing():
             app_wait(20)
     except OSError:
-        print(" DFPlayer went offline")
+        print(" DFPlayer stopped unexpectedly")
         wav.stop()
         return
     finally:
@@ -570,7 +573,7 @@ def fade_and_play_effect(folder, track):
     try:
         dfp.volume(Config.DFPlayer.VOLUME)
     except: # we should only get here if the SD  card was removed
-        print("Warning: Unable to set volume")
+        print("Warning: DFPlayer stopped unexpectedly")
     return
 
 # ****************************************************************************
@@ -651,7 +654,7 @@ if __name__ == "__main__":
         if(Config.USE_LED):
             led.color(Config.LED.DEFAULT)
         app_cleanup()
-        sys.exit()
+        # sys.exit()
 
     except Exception as e:
         print("\nError: %s" % e)

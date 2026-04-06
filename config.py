@@ -117,5 +117,13 @@ class Config:
                 TX    = 0         # RP-Zero.TX -> DFPlayer.RX
                 RX    = 1         # RP-Zero.RX <- DFPlayer.TX
         VOLUME        = 28        # play volume (0-30)
+        
+        EQUALIZER     = 0         #     0: Normal
+                                  #     1: Pop
+                                  #     2: Rock
+                                  #     3: Jazz
+                                  #     4: Classical
+                                  #     5: Bass
+
         FADE          = 2.4       # Volume fade-in duration (seconds)
         FADE_STEPS    = 20        # number of fade-in steps
