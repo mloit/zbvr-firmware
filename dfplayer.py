@@ -333,12 +333,14 @@ class DFPlayer:
         self._print("Mount message received")
         self._print("Detected Storage:", DFstorage_strings[sto & _STORAGE_MASK])
         self._storage |= sto
+        self._online = True
 
     def _handle_unmount(self, sto):
         self._print("Unnount message received")
         self._print("Removed Storage:", DFstorage_strings[sto & _STORAGE_MASK])
-        self._storage &= sto
+        self._storage &= ~sto
         self._status = DFstatus.STOPPED
+        self._online = False
     
     def _handle_play_stop(self, cmd, par_hi, par_lo):
         par16 = (par_hi << 8) + par_lo

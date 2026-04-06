@@ -152,7 +152,7 @@ class WAV:
         self._pwm.duty_u16(BIAS)
 
         self._tmr = Timer()
-        self._tmr.init(freq=self._rate, mode=Timer.PERIODIC, callback=self._timer_isr)
+        self._tmr.init(freq=self._rate, mode=Timer.PERIODIC, callback=self._timer_isr, hard=True)
 
     # stop playing and cleanup
     def stop(self):

@@ -19,22 +19,23 @@
 #
 # Notes:
 # - Total refactor of Zion's original "5.9.1" code 
-# - Modularized most things to make it more maintanable 
+# - Modularized most things to make it more maintainable 
 # - Centralized configuration settings into 'config.py'
-# - Added bi-directional commmunications withteh DFPlayer
+# - Added bi-directional communications with the DFPlayer
 # - Removed blind searching if another track or folder exists
 # - Added generation of the playlist at boot to only have folders with valid tracks to prevent lockups
-# - Added colours to varous states to give more visual feedback
+# - Added colours to various states to give more visual feedback
 # - made the button monitoring timer based, to simplify the main loop
 # - converted the main loop into a state machine
 # - added exception handling to main, to clean up nicely on a crash or when Thonny stops the program
+# - added handling of live SD card removal and insertion
 
 # Known issues with ALPHA
 # - if there is a gap in folder names, some folders after the gaps may be mised
-#   -- solution, either scan for all 99 possibilities, or make the caviat that foldernames cannot
-#      be skipped, but folders can be left empty
+#   -- solution, either scan for all 99 possibilities (slow), or make the caviat that foldernames cannot
+#      be skipped, but folders can be left empty (easier)
 
-_VERSION = "26.0.1 ALPHA-2"
+_VERSION = "26.0.1 ALPHA3"
 
 import micropython
 micropython.opt_level(3) # comment out this line when debugging
@@ -129,14 +130,16 @@ def generate_playlist(folders = -1):
 # ****************************************************************************
 #state machine constants
 class State:
-    IDLE        = 0 # Idle state, Potentiometer in off poosition (Next: POWER_UP)
-    BOOT        = 2 # Potentiometer just turned on Wait for DFPlayer to boot (Next: START_UP)
-    MEDIA_CHECK = 3 # Check and wait for SD Card
-    START_UP    = 5 # Initialize playlist, start first track
-    PLAY_TRACK  = 6 # Normal run state, plays to the end of the track
-    PLAY_NEXT   = 7 # normal advance to next track
-    NEXT_ALBUM  = 8 # special advance where effect is played at transition
-    POWER_DN    = 9 # Potentiometer just turned off (Next: IDLE)
+    IDLE        = 0  # Idle state, Potentiometer in off poosition (Next: POWER_UP)
+    BOOT        = 2  # Potentiometer just turned on Wait for DFPlayer to boot (Next: START_UP)
+    MEDIA_CHECK = 3  # Check and wait for SD Card
+    START_UP    = 5  # Initialize playlist, start first track
+    PLAY_TRACK  = 6  # Normal run state, plays to the end of the track
+    PLAY_NEXT   = 7  # normal advance to next track
+    NEXT_ALBUM  = 8  # special advance where effect is played at transition
+    MEDIA_WAIT  = 9  # SD Card was reoved, waiting for insertion
+    MEDIA_LOAD  = 10 # SD Card was inserted, reload and resume playback
+    POWER_DN    = 11 # Potentiometer just turned off (Next: IDLE)
 
 app_state = State.IDLE
 states = {}
@@ -193,6 +196,11 @@ states[State.BOOT] = app_boot
 # ****************************************************************************
 # DFPlayer is booted, check for media, wait if necessary
 def app_media_check(last):
+
+    if power_sense.value() == 0:
+        print("Power Off Detected")
+        return State.POWER_DN
+
     if(last != State.MEDIA_CHECK):
         no_card = not dfp.has_sdc()
         print("SDCard ", end="")
@@ -209,6 +217,11 @@ def app_media_check(last):
 
     last_hint = time.ticks_ms()
     while not dfp.has_sdc():
+
+        if power_sense.value() == 0:
+            print("Power Off Detected")
+            return State.POWER_DN
+
         if time.ticks_diff(time.ticks_ms(), last_hint) > App.Timing.HINT:
             print(" - still waiting SDCard insertion")
             return State.MEDIA_CHECK
@@ -253,6 +266,7 @@ def app_start_up(last):
     if App.Playlist.PRESEVE and restore_playlist:
         playlist.set_index(playlist_restore_idx)
         playlist.set_track(playlist_restore_trk)
+    restore_playlist = False
     
     print("\n" + "*" * 40 + "\n")
  
@@ -388,15 +402,111 @@ def app_power_down(last):
     dfp.set_offline()
 
     # invalidate the playlist, preserving state for possible restoration
-    restore_playlist = True
-    playlist_restore_idx = playlist.get_index()
-    playlist_restore_trk = playlist.get_track()
-    playlist.clear()
+    # in case SDCard was removed when we power-down, don't try to overwrite the existing saved state
+    if not restore_playlist:
+        restore_playlist = True
+        playlist_restore_idx = playlist.get_index()
+        playlist_restore_trk = playlist.get_track()
+        playlist.clear()
 
     print("Power-Down")
     return State.IDLE
 
 states[State.POWER_DN] = app_power_down
+
+# ****************************************************************************
+# SD Card was removed (Main loop auto-injects this state when SD Card is removed)
+# reset playlist
+# stop button
+# wait for re-insertion
+def app_media_wait(last):
+    global restore_playlist, playlist_restore_idx, playlist_restore_trk
+
+    if power_sense.value() == 0:
+        print("Power Off Detected")
+        return State.POWER_DN
+
+    if last != State.MEDIA_WAIT:
+        button.stop()
+
+        restore_playlist = True
+        playlist_restore_idx = playlist.get_index()
+        playlist_restore_trk = playlist.get_track()
+        playlist.clear()
+
+        print("SDCard was removed, waiting for SDCard")
+        if(Config.USE_LED):
+            led.color(App.Colors.WAITING)
+        return State.MEDIA_WAIT
+
+    last_hint = time.ticks_ms()
+    while not dfp.has_sdc():
+
+        if power_sense.value() == 0:
+            print("Power Off Detected")
+            return State.POWER_DN
+        
+        if time.ticks_diff(time.ticks_ms(), last_hint) > App.Timing.HINT:
+            print(" - still waiting SDCard insertion")
+            return State.MEDIA_WAIT
+        app_wait(App.Timing.MAIN)
+
+    print("SDCard inserted")
+    if(Config.USE_LED):
+        led.color(App.Colors.IDLE)
+
+    return State.MEDIA_LOAD
+
+states[State.MEDIA_WAIT] = app_media_wait
+
+
+# ****************************************************************************
+# SD Card was re-inserted
+# rebuild playlist
+# restart button
+# resume playing
+def app_media_load(last):
+    global restore_playlist, playlist_restore_idx, playlist_restore_trk
+
+    if power_sense.value() == 0:
+        print("Power Off Detected")
+        return State.POWER_DN
+    if(last == State.MEDIA_LOAD):
+        return State.PLAY_TRACK
+
+    folders = dfp.get_folder_count()
+    total = dfp.get_total_files()
+
+    print("Filesystem has", total, "files in", folders, "folders")
+    #time.sleep_ms(Timing.Guard)
+
+    generate_playlist(folders)
+
+    # no point in continuing if there are no music files
+    if playlist.albums() == 0:
+        print("No albums or tracks found... Exiting")
+        raise OSError("No Music Found")
+    
+    # If this is a warm power-up, we can optionally continue where we left-off
+    if App.Playlist.PRESEVE and restore_playlist:
+        playlist.set_index(playlist_restore_idx)
+        playlist.set_track(playlist_restore_trk)
+    restore_playlist = False
+    
+    # start by playing the first album & track, with AM radio effect
+    album, track = playlist.current()
+
+    print(f"Now Playing: Album {album:02d} Track {track:03d}")
+
+    dfp.volume(Config.DFPlayer.VOLUME)
+
+    dfp.play_folder_track(album, track)
+
+    button.start() # start the button monitor 
+
+    return State.PLAY_TRACK
+
+states[State.MEDIA_LOAD] = app_media_load
 
 # ****************************************************************************
 # AM Radio Effect Playback
@@ -416,11 +526,6 @@ def fade_and_play_effect(folder, track):
 
     if(Config.USE_LED):
         led.color(App.Colors.PLAYING_WAV)
-
-    # the PWM player uses a lot of python resources, and causes problems
-    # with out uart code in the DFPlayer. To reduce risk of issue here
-    # we temporarily disable command acknowledgements to reduce traffic
-    ack_mode = dfp.disable_reliability()
 
     print(f"PWM Audio: starting  '{Config.Audio.FILE}'")
     wav.play(fade_out=Config.Audio.FADE_OUT)
@@ -450,19 +555,22 @@ def fade_and_play_effect(folder, track):
 
         while wav.is_playing():
             app_wait(20)
-
+    except OSError:
+        print(" DFPlayer went offline")
+        wav.stop()
+        return
     finally:
         wav.stop()
-
-    # restore the DFPlayer command acknowledgement mode
-    dfp.enable_reliability(ack_mode)
 
     if(Config.USE_LED):
         led.color(App.Colors.PLAYING_SONG)
     print(f"PWM Audio: '{Config.Audio.FILE}' playback complete")
 
     # just in case make sure we leave with volume set to where we expect
-    dfp.volume(Config.DFPlayer.VOLUME)
+    try:
+        dfp.volume(Config.DFPlayer.VOLUME)
+    except: # we should only get here if the SD  card was removed
+        print("Warning: Unable to set volume")
     return
 
 # ****************************************************************************
@@ -482,7 +590,7 @@ if App.Effects.ENABLE:
 # ****************************************************************************
 # Main Loop
 # ****************************************************************************
-#TODO: Add SDCard removal handling
+#TODO: Add SDCard removal handling, and power loss check
 def main():
     global app_state
 
@@ -501,6 +609,15 @@ def main():
     last = None
     while True:
         # basic loop logic
+
+        # check power state, force power_down if power was lost
+        if (app_state > State.IDLE) and (power_sense.value() == 0):
+            app_state = State.POWER_DN
+
+        # check if SDCard is present, force lost and wait to recover state
+        if (app_state > State.START_UP) and (app_state < State.MEDIA_WAIT) and (not dfp.has_sdc()):
+            app_state = State.MEDIA_WAIT
+
         current = app_state
         app_state = states[app_state](last)
         last = current
