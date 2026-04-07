@@ -13,6 +13,8 @@ This repository is intended to work in conjunction with the [PCB I designed](htt
 
 ## Installation
 
+For the latest 26.0.1 Pre-Release (alpha or beta) see the [Releases page](https://github.com/mloit/zbvr-firmware/releases)
+
 ### The Easy Way
 
 Starting with 26.0.1 The code is available in a `.UF2` file.
