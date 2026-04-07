@@ -67,7 +67,7 @@ micropython.mem_info()
 
 print("\nInitiailzing Modules")
 
-if Config.led.ENABLE:
+if Config.LED.ENABLE:
     led = LED(Config.LED.PIN)
     led.color(Config.LED.DEFAULT)
 
@@ -102,7 +102,7 @@ if Config.I2C.ENABLE:
 # ****************************************************************************
 # Playlist Handling
 # ****************************************************************************
-playlist = Playlist(advance_floder = App.Playlist.CYCLE_ALBUMS, 
+playlist = Playlist(advance_folder = App.Playlist.CYCLE_ALBUMS, 
                     shuffle_albums = App.Playlist.ALBUM_SHUFFLE, 
                     shuffle_tracks = App.Playlist.TRACK_SHUFFLE)
 
@@ -173,7 +173,7 @@ def app_wait(duration):
 def app_idle(last):
     if last != State.IDLE:
         print("Waiting for Power On (potentiometer)")
-        if Config.led.ENABLE:
+        if Config.LED.ENABLE:
             led.color(App.Colors.IDLE)
 
     if power_sense.value() == 1:
@@ -212,7 +212,7 @@ states[State.BOOT] = app_warm_boot
 def app_boot(last):
     if last != State.BOOT:
         print("Waiting for DFPlayer to come online")
-        if Config.led.ENABLE:
+        if Config.LED.ENABLE:
             led.color(App.Colors.WAITING)
     if power_sense.value() == 0:
         print("Power Off Detected")
@@ -242,7 +242,7 @@ def app_media_check(last):
 
         if no_card:
             print("Waiting for SDCard insertion")
-            if Config.led.ENABLE:
+            if Config.LED.ENABLE:
                 led.color(App.Colors.WAITING)
             return State.MEDIA_CHECK
         return State.START_UP
@@ -260,7 +260,7 @@ def app_media_check(last):
         app_wait(App.Timing.MAIN)
 
     print("SDCard inserted")
-    if Config.led.ENABLE:
+    if Config.LED.ENABLE:
         led.color(App.Colors.IDLE)
 
     return State.START_UP
@@ -327,7 +327,7 @@ states[State.START_UP] = app_start_up
 def app_play(last):
     if last != State.PLAY_TRACK:
         print(" - Waiting for playback to complete")
-        if Config.led.ENABLE:
+        if Config.LED.ENABLE:
             led.color(App.Colors.PLAYING_SONG)
     if power_sense.value() == 0:
         print("Power Off Detected")
@@ -341,7 +341,7 @@ def app_play(last):
             return State.PLAY_NEXT
         else:
             print(f"Album {album:02d} Track {track:03d} playback complete")
-        if Config.led.ENABLE:
+        if Config.LED.ENABLE:
             led.color(App.Colors.IDLE)
         app_wait(App.Timing.GUARD)
         return State.PLAY_NEXT
@@ -376,7 +376,7 @@ def app_next(last):
     # a normal transition
     if evt != Controls.Event.NONE:
         dfp.stop()
-        if Config.led.ENABLE:
+        if Config.LED.ENABLE:
             led.color(App.Colors.IDLE)
         app_wait(App.Timing.GUARD)
 
@@ -421,7 +421,7 @@ def app_next_album(last):
     else:
         # no transition effect, emulate a normal transition
         dfp.stop()
-        if Config.led.ENABLE:
+        if Config.LED.ENABLE:
             led.color(App.Colors.IDLE)
         app_wait(App.Timing.GUARD)
 
@@ -443,7 +443,7 @@ def app_power_down(last):
     if last == State.POWER_DN:
         return State.IDLE
 
-    if Config.led.ENABLE:
+    if Config.LED.ENABLE:
         led.color(App.Colors.IDLE)
 
     button.stop() # stop the button monitor 
@@ -483,7 +483,7 @@ def app_media_wait(last):
         playlist.clear()
         
         print("SDCard was removed, waiting for SDCard")
-        if Config.led.ENABLE:
+        if Config.LED.ENABLE:
             led.color(App.Colors.WAITING)
         return State.MEDIA_WAIT
 
@@ -500,7 +500,7 @@ def app_media_wait(last):
         app_wait(App.Timing.MAIN)
 
     print("SDCard inserted")
-    if Config.led.ENABLE:
+    if Config.LED.ENABLE:
         led.color(App.Colors.IDLE)
 
     return State.MEDIA_LOAD
@@ -560,7 +560,7 @@ states[State.MEDIA_LOAD] = app_media_load
 # ****************************************************************************
 def fade_and_play_effect(folder, track, large=False):
 
-    if Config.led.ENABLE:
+    if Config.LED.ENABLE:
         led.color(App.Colors.PLAYING_WAV)
 
 
@@ -641,7 +641,7 @@ def fade_and_play_effect(folder, track, large=False):
 
     # print(f"Actual Fade Times: Out: {t_stop_out}ms In: {t_stop_in}ms")
 
-    if Config.led.ENABLE:
+    if Config.LED.ENABLE:
         led.color(App.Colors.PLAYING_SONG)
     print(f"PWM Audio: '{Config.Audio.FILE}' playback complete")
 
@@ -725,13 +725,13 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt: # this is when Thonny stops the code
         print("\nStopped by user")
-        if Config.led.ENABLE:
+        if Config.LED.ENABLE:
             led.color(Config.LED.DEFAULT)
         app_cleanup()
 
     except Exception as e:
         print("\nError: %s" % e)
-        if Config.led.ENABLE:
+        if Config.LED.ENABLE:
             led.color(App.Colors.ERROR)
         app_cleanup()
         print("Waiting for power off to reset")
@@ -739,6 +739,6 @@ if __name__ == "__main__":
             time.sleep_ms(20)
         print("resetting in 1 second")
         time.sleep_ms(1000)
-        if Config.led.ENABLE:
+        if Config.LED.ENABLE:
             led.color(App.Colors.WARNING)
         machine.soft_reset() # software only reset

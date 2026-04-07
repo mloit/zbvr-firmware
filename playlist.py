@@ -52,9 +52,9 @@ class Playlist:
         album_order    = []    # play order (when shuffling) for albums
         track_order    = []    # play order (when shuffling) for tracks in the current album
 
-    def __init__(self, advance_floder=False, shuffle_tracks=False, shuffle_albums=False):
+    def __init__(self, advance_folder=False, shuffle_tracks=False, shuffle_albums=False):
         self._state = Playlist.State()
-        self._advance_folder = advance_floder
+        self._advance_folder = advance_folder
         self._shuffle_albums = shuffle_albums
         self._shuffle_tracks = shuffle_tracks
         self.playlist = []   # list of entries stored as a tuple (album_id, tracks)
