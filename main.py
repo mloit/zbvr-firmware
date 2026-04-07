@@ -44,7 +44,7 @@
 # -  turning pot off during AM playback can cause the code to hang
 #   -- need timeouts on the comms with the DFPlayer so we don't wait forever
 
-_VERSION = "26.0.1 ALPHA6"
+_VERSION = "26.0.1 ALPHA7"
 
 import micropython
 micropython.opt_level(3) # comment out this line when debugging
@@ -128,9 +128,6 @@ def generate_playlist(folders = -1):
         files = dfp.get_file_count(dir + 1)
         if files:
             print("+", end="")
-            if files >= 256: # for some reason the DFPlayer reports double the files when there are 256 or more
-                files //= 2  # adjust the count back to the actual number
-
             playlist.add(dir+1, files)
         else:
             print(".",end="")
