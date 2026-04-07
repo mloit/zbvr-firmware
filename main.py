@@ -32,7 +32,7 @@
 # - added ability to change the equalizer setting
 # - WAV playback can now fade in and out for softer edge transitions
 # - Album change can now fade out & back in with the WAV playback for a smoother transition
-# - added support fort large folders (4 digit filename). Folders with 256 tracks or more can only be
+# - added support for large folders (4 digit filename). Folders with 256 tracks or more can only be
 #   in the range of 01-15. The folder must have more than 255 tracks for the code to automatically
 #   switch to using 4 digit names.
 # - Added support for track and album randomization
@@ -44,16 +44,13 @@
 # -  turning pot off during AM playback can cause the code to hang
 #   -- need timeouts on the comms with the DFPlayer so we don't wait forever
 
-_VERSION = "26.0.1 ALPHA7"
-
 import micropython
-micropython.opt_level(3) # comment out this line when debugging
-micropython.alloc_emergency_exception_buf(400)
-
+import time, machine
 from machine import Pin, I2C
-import time, sys, machine
 
-print(f"starting ticks {time.ticks_ms()}")
+# enable optimizations for all our code
+micropython.opt_level(3)
+micropython.alloc_emergency_exception_buf(100)
 
 from config import App, Config
 from led import LED
@@ -62,13 +59,15 @@ from dfplayer import DFPlayer, DFequalizer_strings, DFequalizer
 from controls import Controls
 from playlist import Playlist
 
+_VERSION = "26.0.1 BETA"
+
 lev = micropython.opt_level()
 print(f"\nMicroPython Optimization Level: {lev}")
 micropython.mem_info()
 
 print("\nInitiailzing Modules")
 
-if(Config.USE_LED):
+if Config.led.ENABLE:
     led = LED(Config.LED.PIN)
     led.color(Config.LED.DEFAULT)
 
@@ -94,7 +93,7 @@ button = Controls(Config.Button.PIN,
                   long_press  = Config.Button.LONG_PRESS)
 
 # configure I2C if used
-if(Config.USE_I2C):
+if Config.I2C.ENABLE:
     i2c = I2C(Config.I2C.UNIT, 
               sda  = Config.I2C.Pins.SDA, 
               scl  = Config.I2C.Pins.SCL, 
@@ -104,8 +103,8 @@ if(Config.USE_I2C):
 # Playlist Handling
 # ****************************************************************************
 playlist = Playlist(advance_floder = App.Playlist.CYCLE_ALBUMS, 
-                    shuffle_albums = App.Playlist.ALBUM_RANDOMIZE, 
-                    shuffle_tracks = App.Playlist.TRACK_RANDOMIZE)
+                    shuffle_albums = App.Playlist.ALBUM_SHUFFLE, 
+                    shuffle_tracks = App.Playlist.TRACK_SHUFFLE)
 
 restore_playlist = False
 playlist_restore_idx = -1
@@ -172,9 +171,9 @@ def app_wait(duration):
 # Idle state loop body
 # power is off
 def app_idle(last):
-    if(last != State.IDLE):
+    if last != State.IDLE:
         print("Waiting for Power On (potentiometer)")
-        if(Config.USE_LED):
+        if Config.led.ENABLE:
             led.color(App.Colors.IDLE)
 
     if power_sense.value() == 1:
@@ -194,17 +193,16 @@ states[State.IDLE] = app_idle
 # ****************************************************************************
 # power was already on, send reset, advance to boot
 def app_warm_boot(last):
-    if(last != State.BOOT):
-        print("Waiting for DFPlayer to come online")
-        if(Config.USE_LED):
-            led.color(App.Colors.WAITING)
-    if power_sense.value() == 0:
-        print("Power Off Detected")
-        return State.POWER_DN
-    if dfp.is_online():
-        print("DFPlayer online, ready to proceed")
-        return State.MEDIA_CHECK
-    
+    if last != State.WARM_BOOT:
+        return State.BOOT
+
+    # TODO: Add a boot attempt counter, and cycle to an error state if we exceend 
+    # the count
+    # raise OSError("Too many failed boot attempts") 
+
+    # send a reset to the DFPlayer
+    dfp.reset()
+
     return State.BOOT
 
 states[State.BOOT] = app_warm_boot
@@ -212,9 +210,9 @@ states[State.BOOT] = app_warm_boot
 # ****************************************************************************
 # power was turned on, wait for DFPlayer to boot. 
 def app_boot(last):
-    if(last != State.BOOT):
+    if last != State.BOOT:
         print("Waiting for DFPlayer to come online")
-        if(Config.USE_LED):
+        if Config.led.ENABLE:
             led.color(App.Colors.WAITING)
     if power_sense.value() == 0:
         print("Power Off Detected")
@@ -235,7 +233,7 @@ def app_media_check(last):
         print("Power Off Detected")
         return State.POWER_DN
 
-    if(last != State.MEDIA_CHECK):
+    if last != State.MEDIA_CHECK:
         no_card = not dfp.has_sdc()
         print("SDCard ", end="")
         if no_card:
@@ -244,7 +242,7 @@ def app_media_check(last):
 
         if no_card:
             print("Waiting for SDCard insertion")
-            if(Config.USE_LED):
+            if Config.led.ENABLE:
                 led.color(App.Colors.WAITING)
             return State.MEDIA_CHECK
         return State.START_UP
@@ -262,7 +260,7 @@ def app_media_check(last):
         app_wait(App.Timing.MAIN)
 
     print("SDCard inserted")
-    if(Config.USE_LED):
+    if Config.led.ENABLE:
         led.color(App.Colors.IDLE)
 
     return State.START_UP
@@ -280,7 +278,7 @@ def app_start_up(last):
     if power_sense.value() == 0:
         print("Power Off Detected")
         return State.POWER_DN
-    if(last == State.START_UP):
+    if last == State.START_UP:
         return State.PLAY_TRACK
 
     folders = dfp.get_folder_count()
@@ -327,31 +325,23 @@ states[State.START_UP] = app_start_up
 # normal loop body
 # Assumes a track is already playing on entry
 def app_play(last):
-    if(last != State.PLAY_TRACK):
+    if last != State.PLAY_TRACK:
         print(" - Waiting for playback to complete")
-        if(Config.USE_LED):
+        if Config.led.ENABLE:
             led.color(App.Colors.PLAYING_SONG)
     if power_sense.value() == 0:
         print("Power Off Detected")
         return State.POWER_DN
 
-    # album, track = playlist.current()
-    # any button press event will result in a change of tracks
-    # we leave the current one playing though
-    # if button.has_event():
-    #     print(f"Album {album:02d} Track {track:03d} playback stopped") # technically not yet, but soon
-    #     return State.PLAY_NEXT
-
     # check if playback stopped naturally
     if (not dfp.is_playing()) or button.has_event():
         album, track = playlist.current()
         if button.has_event():
-            # dfp.stop() # stop now happens in the cross-fade to the new album (or in the following states)
             print(f"Album {album:02d} Track {track:03d} playback stopped") # technically not yet, but soon
             return State.PLAY_NEXT
         else:
             print(f"Album {album:02d} Track {track:03d} playback complete")
-        if(Config.USE_LED):
+        if Config.led.ENABLE:
             led.color(App.Colors.IDLE)
         app_wait(App.Timing.GUARD)
         return State.PLAY_NEXT
@@ -363,7 +353,7 @@ states[State.PLAY_TRACK] = app_play
 # normal loop body
 # sets up next track to play
 def app_next(last):
-    if(last == State.PLAY_NEXT):
+    if last == State.PLAY_NEXT:
         return State.PLAY_TRACK
     
     if power_sense.value() == 0:
@@ -386,7 +376,7 @@ def app_next(last):
     # a normal transition
     if evt != Controls.Event.NONE:
         dfp.stop()
-        if(Config.USE_LED):
+        if Config.led.ENABLE:
             led.color(App.Colors.IDLE)
         app_wait(App.Timing.GUARD)
 
@@ -413,7 +403,7 @@ states[State.PLAY_NEXT] = app_next
 # normal loop body
 # sets up next album to play, and begins play with AM Radio effect
 def app_next_album(last):
-    if(last == State.NEXT_ALBUM):
+    if last == State.NEXT_ALBUM:
         return State.PLAY_TRACK
     
     if power_sense.value() == 0:
@@ -431,7 +421,7 @@ def app_next_album(last):
     else:
         # no transition effect, emulate a normal transition
         dfp.stop()
-        if(Config.USE_LED):
+        if Config.led.ENABLE:
             led.color(App.Colors.IDLE)
         app_wait(App.Timing.GUARD)
 
@@ -450,10 +440,10 @@ states[State.NEXT_ALBUM] = app_next_album
 def app_power_down(last):
     global restore_playlist, playlist_state
 
-    if(last == State.POWER_DN):
+    if last == State.POWER_DN:
         return State.IDLE
 
-    if(Config.USE_LED):
+    if Config.led.ENABLE:
         led.color(App.Colors.IDLE)
 
     button.stop() # stop the button monitor 
@@ -493,7 +483,7 @@ def app_media_wait(last):
         playlist.clear()
         
         print("SDCard was removed, waiting for SDCard")
-        if(Config.USE_LED):
+        if Config.led.ENABLE:
             led.color(App.Colors.WAITING)
         return State.MEDIA_WAIT
 
@@ -510,7 +500,7 @@ def app_media_wait(last):
         app_wait(App.Timing.MAIN)
 
     print("SDCard inserted")
-    if(Config.USE_LED):
+    if Config.led.ENABLE:
         led.color(App.Colors.IDLE)
 
     return State.MEDIA_LOAD
@@ -529,7 +519,7 @@ def app_media_load(last):
     if power_sense.value() == 0:
         print("Power Off Detected")
         return State.POWER_DN
-    if(last == State.MEDIA_LOAD):
+    if last == State.MEDIA_LOAD:
         return State.PLAY_TRACK
 
     folders = dfp.get_folder_count()
@@ -570,7 +560,7 @@ states[State.MEDIA_LOAD] = app_media_load
 # ****************************************************************************
 def fade_and_play_effect(folder, track, large=False):
 
-    if(Config.USE_LED):
+    if Config.led.ENABLE:
         led.color(App.Colors.PLAYING_WAV)
 
 
@@ -651,7 +641,7 @@ def fade_and_play_effect(folder, track, large=False):
 
     # print(f"Actual Fade Times: Out: {t_stop_out}ms In: {t_stop_in}ms")
 
-    if(Config.USE_LED):
+    if Config.led.ENABLE:
         led.color(App.Colors.PLAYING_SONG)
     print(f"PWM Audio: '{Config.Audio.FILE}' playback complete")
 
@@ -662,18 +652,22 @@ def fade_and_play_effect(folder, track, large=False):
 if App.Effects.ENABLE:
     # micropython.mem_info()
     print(f"Loading Audio Data: '{Config.Audio.FILE}'")
-    wav = WAV(Config.Audio.PIN, Config.Audio.FILE, Config.Audio.VOLUME, Config.Audio.CARRIER)
-    samps = wav.get_size()
-    rate = wav.get_rate()
-    duration = (1.0 * samps) / (1.0 * rate)
-    rate = rate / 1000
-    print(f"Audio Data: {rate}KHz {samps} samples / {duration:.2f}s" )
+    try:
+        wav = WAV(Config.Audio.PIN, Config.Audio.FILE, Config.Audio.VOLUME, Config.Audio.CARRIER)
+    except:
+        print("Error Loading Audio Data. Disabling feature")
+        App.Effects.ENABLE = False # type: ignore - Goes against convention, but this is deliberate
+    else:
+        samps = wav.get_size()
+        rate = wav.get_rate()
+        duration = (1.0 * samps) / (1.0 * rate)
+        rate = rate / 1000
+        print(f"Audio Data: {rate}KHz {samps} samples / {duration:.2f}s" )
     # micropython.mem_info()
 
 # ****************************************************************************
 # Main Loop
 # ****************************************************************************
-#TODO: Add SDCard removal handling, and power loss check
 def main():
     global app_state
 
@@ -686,8 +680,8 @@ def main():
 
     if power_sense.value() == 1:
         app_state = State.BOOT
-        print("Power Detected")
         dfp.reset()
+        print("Power Detected")
 
     last = None
     while True:
@@ -714,7 +708,7 @@ def main():
 def app_cleanup():
     if button.is_runnning:
         button.stop()
-    if wav.is_playing():
+    if App.Effects.ENABLE and wav.is_playing():
         wav.stop()
     if dfp.is_online():
         dfp.disable_reliability()
@@ -731,14 +725,13 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt: # this is when Thonny stops the code
         print("\nStopped by user")
-        if(Config.USE_LED):
+        if Config.led.ENABLE:
             led.color(Config.LED.DEFAULT)
         app_cleanup()
-        # sys.exit()
 
     except Exception as e:
         print("\nError: %s" % e)
-        if(Config.USE_LED):
+        if Config.led.ENABLE:
             led.color(App.Colors.ERROR)
         app_cleanup()
         print("Waiting for power off to reset")
@@ -746,8 +739,6 @@ if __name__ == "__main__":
             time.sleep_ms(20)
         print("resetting in 1 second")
         time.sleep_ms(1000)
-        if(Config.USE_LED):
+        if Config.led.ENABLE:
             led.color(App.Colors.WARNING)
         machine.soft_reset() # software only reset
-        # machine.reset()    # hard reset
-        # raise

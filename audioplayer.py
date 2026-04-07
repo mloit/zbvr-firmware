@@ -49,7 +49,7 @@ class WAV:
         self._lut      = self._build_table(self._volume)   # quick LUT for PWM duty during playback
         self._fade_in  = 0      # number of fade in samples
         self._fade_out = 0      # number of fade_out samples
-        self.isr_done = False
+        self._isr_done = False
         self._isr_index = 0
 
     def get_rate(self):
@@ -155,7 +155,7 @@ class WAV:
         self._isr_index = idx + 1
 
     # play the loaded wav file
-    def play(self, fade_in=0, fade_out=0):
+    def play(self, fade_in=0.0, fade_out=0.0):
 
         # reset the state
         self._isr_done = False

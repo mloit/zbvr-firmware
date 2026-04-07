@@ -74,7 +74,7 @@ class Controls:
         
         # timer related
         self._running = False            # true when the timer is initialized and running
-        self._tmr = None
+        self._tmr = Timer()
 
         # debouncing
         self._isr_count = 0
@@ -96,7 +96,6 @@ class Controls:
     def _reset(self):
         # timer related
         self._running = False            # true when the timer is initialized and running
-        self._tmr = None
 
         # debouncing
         self._isr_count = 0
@@ -207,7 +206,6 @@ class Controls:
     def start(self):
         if self._running: # already running, nothing more to do
             return
-        self._tmr = Timer()
         self._tmr.init(period = self._period, mode=Timer.PERIODIC, callback=self.timer_isr)
         self._running = True
 

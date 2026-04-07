@@ -49,8 +49,8 @@ class Playlist:
         track          = 0     # current track in album
         album_count    = 0     # total number of albums - informational only, used for validation on restore
         file_count     = 0     # total number of files - informational only, used for validation on restore
-        album_order    = None  # play order (when shuffling) for albums
-        track_order    = None  # play order (when shuffling) for tracks in the current album
+        album_order    = []    # play order (when shuffling) for albums
+        track_order    = []    # play order (when shuffling) for tracks in the current album
 
     def __init__(self, advance_floder=False, shuffle_tracks=False, shuffle_albums=False):
         self._state = Playlist.State()

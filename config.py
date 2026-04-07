@@ -21,7 +21,6 @@ print("Loading Config")
 # Application Configuration
 # ****************************************************************************
 class App:
-
     class Playlist:
         # Attempt to presserve album and track index in the playlist between (pot) power-cycles
         # only works as long as the RP remains powered, and the contents of the SD don't change
@@ -32,11 +31,11 @@ class App:
         # setting this option to true will cause it to advance to the next album
         CYCLE_ALBUMS     = False
 
-        # Randomize playback of tracks within an album
-        TRACK_RANDOMIZE = False
+        # Shuffle playback of tracks within an album
+        TRACK_SHUFFLE    = False
 
-        # Randomize playback of tracks within an album
-        ALBUM_RANDOMIZE = False
+        # Shuffle order in which albums are played
+        ALBUM_SHUFFLE    = False
 
     class Effects:
         # enables the use of the PWM Audio module,
@@ -71,16 +70,17 @@ class App:
 # Hardware configuration
 # ****************************************************************************
 class Config:
-    USE_LED         = True        # Enable/Disable use of NeoPixel LED
-    USE_I2C         = False       # Enable/Disable I2C
+
 # NeoPixel LED -- Onboard Status LED, or future effects
     class LED:
+        ENABLE        = True      # Enable/Disable use of NeoPixel LED
         PIN           = 16        # RP-Zero LED is GPIO16, PCB LED is GPIO6 (optional config)
         COUNT         = 1         # number of NeoPixels attached
         DEFAULT       = (4, 4, 4) # White(ish) -- default colour at startup/power-on
 
 # I2C Settings (currently unused, build option)
     class I2C:
+        ENABLE        = False     # Enable/Disable I2C
         UNIT          = 0         # I2C0 on RP2040
         class Pins:
             SDA       = 4         # SDA0 on RP2040

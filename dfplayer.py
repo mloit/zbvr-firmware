@@ -6,11 +6,10 @@
 #          File: dfplayer.py
 #       Version: 26.0.1
 #   Description: Full implementation of the serial protocol used by the
-#                DFPlayer from DFRobot. Largely modelled after the Arduino/CPP
-#                library implementation published by DFRobot
+#                DFPlayer from DFRobot. 
 # 
 #        Author: Mark Loit
-#        Credit: Zion Brock (Original code and inspiration)
+#        Credit: Zion Brock (Original Vintage Radio code and inspiration)
 #
 #       License: CC BY-NC-SA
 # 
@@ -18,8 +17,7 @@
 # ****************************************************************************
 
 # TODO:
-#  - Create custom exceptions and ge rid of the generic OSErrors
-#  - Add timeouts for responses so we don't wait forever
+#  - Create custom exceptions and get rid of the generic OSErrors
 
 from machine import UART, Pin
 import time, micropython, machine
@@ -28,6 +26,11 @@ print("Loading Module: DFPlayer")
 
 # baudrate used by the DFPlayer protocol
 _DF_BAUD = 9600
+
+_DF_FRAME_TIME  = 10  # milliseconds - approximate time to send 1 frame of 10 bytes, 10 bits per byte, at 9600 baud
+_DF_ACK_TIMEOUT = 25  # milliseconds - max time to wait for an ACK or Error (2.5 frame times)
+_DF_QUERY_TIMEOUT = 100 # milliseconds - max time for a query
+_DF_FILE_QUERY_TIMEOUT = 1000 # milliseconds - max time for a file/folder query (these can take longer than normal queries)
 
 # ****************************************************************************
 # Command Constants
@@ -284,7 +287,7 @@ class DFPlayer:
         if nbytes:
             self._uart.read(nbytes)
         # register the receive handler
-        self._uart.irq(handler=self._uart_isr, trigger=UART.IRQ_RXIDLE)
+        self._uart.irq(handler=self._uart_isr, trigger=UART.IRQ_RXIDLE) # type: ignore - This is fine
 
     # debug message printer
     def _print(self, *msg):
@@ -490,6 +493,8 @@ class DFPlayer:
 # Packet TX 
 # ****************************************************************************
     # send_frame
+    # ack = enables a response packet
+    # wait = wait for transmission to complete. 
     def _send_frame(self, cmd, arg = 0, ack = False, wait = False):
         self._sending[DFframe.CMD] = cmd
         self._sending[DFframe.PARAMETERLO] = arg & 0x00ff
@@ -513,7 +518,7 @@ class DFPlayer:
         if wait:
             self._uart.flush()
 
-    # sends a command without waiting
+    # sends a command without generating or waiting for an acknowledge
     def _send_command(self, cmd, arg = 0, wait = False):
         if (not self._online) or (self._no_media):
             raise OSError("DFPlayer not online")
@@ -521,19 +526,25 @@ class DFPlayer:
         self._send_frame(cmd, arg=arg, wait=wait)
 
     # sends a command, waits for the acknowledgement
-    def _send_command_confirmed(self, cmd, arg = 0):
+    def _send_command_confirmed(self, cmd, arg = 0, timeout=_DF_ACK_TIMEOUT):
         if (not self._online) or (self._no_media):
             raise OSError("DFPlayer not online")
         
         # note only confirms if _use_ack is True
         self._send_frame(cmd, arg=arg, ack=self._use_ack, wait=True)
 
+        deadline = time.ticks_add(time.ticks_ms(), timeout) # calculate the timeout
         if self._use_ack:
-            while self._wait_ack:
-                self._df_sleep_wait(10)
+            while self._wait_ack and (time.ticks_diff(deadline, time.ticks_ms()) > 0):
+                self._df_sleep_wait(_DF_FRAME_TIME // 2) # test for acknoledge twice every frame-time
         else:
-            self._df_sleep_wait(25)
+            self._df_sleep_wait(timeout) # wait the timeout period for an error response
             self._wait_ack = False
+
+        if self._wait_ack: # we timed out!
+            self._wait_ack = False
+            print(f"Command 0x{cmd:02x} timed out")
+            raise OSError("DFPlayer: Operation timed out")
 
         if self._has_error:
             errno = self._get_last_error()
@@ -541,7 +552,7 @@ class DFPlayer:
             raise OSError(DFerror_strings[errno])
 
     # sends a query, and waits for a response
-    def _send_query(self, cmd, arg = 0):
+    def _send_query(self, cmd, arg = 0, timeout=_DF_QUERY_TIMEOUT):
         if (not self._online) or (self._no_media):
             raise OSError("DFPlayer not online")
         
@@ -549,8 +560,14 @@ class DFPlayer:
         self._query = cmd
         self._send_frame(cmd, arg=arg, wait=True)
 
-        while self._waiting:
-            self._df_sleep_wait(10)
+        deadline = time.ticks_add(time.ticks_ms(), timeout) # calculate the timeout
+        while self._waiting and (time.ticks_diff(deadline, time.ticks_ms()) > 0):
+            self._df_sleep_wait(_DF_FRAME_TIME // 2)
+
+        if self._waiting: # we timed out!
+            self._waiting = False
+            print(f"Query 0x{cmd:02x} timed out")
+            raise OSError("DFPlayer: Operation timed out")
 
         if self._has_error:
             errno = self._get_last_error()
@@ -632,7 +649,7 @@ class DFPlayer:
     #     USB_TOTAL     47 0? 00 00 -- number of tracks in usb drive
     #     SDC_TOTAL     48 0? 00 00 -- number of tracks in sd drive
     #     FLASH_TOTAL   49 0? 00 00 -- number of tracks in onboard FLASH  (not documented, but in ref code)
-    def get_total_files(self, storage = DFstorage.AUTO):
+    def get_total_files(self, storage = DFstorage.AUTO, timeout=_DF_FILE_QUERY_TIMEOUT):
         self._print(f"DF: get_total_files({DFstorage_strings[storage]})")
 
         if storage == DFstorage.AUTO:
@@ -708,7 +725,7 @@ class DFPlayer:
     def get_file_count(self, folder):
         self._print(f"DF: get_file_count({folder:02d}) [{DFstorage_strings[self._storage & _STORAGE_MASK]}]")
 
-        self._send_query(DFcmd.query.GET_TRACKS, arg=folder)
+        self._send_query(DFcmd.query.GET_TRACKS, arg=folder, timeout=_DF_FILE_QUERY_TIMEOUT)
         return self._get_query_result()
 
     # get folder count for the current drive
@@ -718,7 +735,7 @@ class DFPlayer:
     def get_folder_count(self):
         self._print(f"DF: get_folder_count() [{DFstorage_strings[self._storage & _STORAGE_MASK]}]")
 
-        self._send_query(DFcmd.query.GET_FOLDERS)
+        self._send_query(DFcmd.query.GET_FOLDERS, timeout=_DF_FILE_QUERY_TIMEOUT)
         return self._get_query_result() - 1
 
 # ****************************************************************************
@@ -1163,12 +1180,12 @@ class CircularBuffer:
     # writes multiple bytes to the buffer 
     # arr is assumed to be a list or array type holding 8bit integer values
     def write(self, arr):
-        len = len(arr)
-        if self.is_full() or self._size + len > self._capacity:
+        bytes = len(arr)
+        if self.is_full() or self._size + bytes > self._capacity:
             raise OSError("Buffer Overflow")
         pos = self._tail
         idx = 0
-        while idx < len:
+        while idx < bytes:
             self._data[pos] = arr[idx]
             pos += 1
             idx += 1
@@ -1177,5 +1194,5 @@ class CircularBuffer:
 
         irq_state = machine.disable_irq() # begin critical section
         self._tail = pos
-        self._size -= len
+        self._size -= bytes
         machine.enable_irq(irq_state) # End of critical section
