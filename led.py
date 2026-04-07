@@ -4,12 +4,12 @@
 #         About: Baseline firmware for the Zion Brock Vintage Radio 
 #
 #          File: led.py
-#       Version: 26.0.1 Alpha
+#       Version: 26.0.1
 #   Description: Abstraction for RGB LED control. Current implementation is 
 #                based on using NeoPixels
 # 
 #        Author: Mark Loit
-#        Credit: Zion Brock
+#        Credit: Zion Brock (Original code and inspiration)
 #
 #       License: CC BY-NC-SA
 # 
