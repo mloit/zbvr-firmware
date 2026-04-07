@@ -13,7 +13,7 @@ This repository is intended to work in conjunction with the [PCB I designed](htt
 
 ## Installation
 
-For the latest 26.0.1 Pre-Release (alpha or beta) see the [Releases page](https://github.com/mloit/zbvr-firmware/releases)
+**Note:** Latest code in `main` may not be stable as some changes may still be in incomplete, as the update is still a work in progress. For the latest 26.0.1 Pre-Release (alpha or beta) see the [Releases page](https://github.com/mloit/zbvr-firmware/releases) 
 
 ### The Easy Way
 
