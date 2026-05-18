@@ -22,8 +22,10 @@
 # - Modularized most things to make it more maintainable 
 # - Centralized configuration settings into 'config.py'
 # - Added bi-directional communications with the DFPlayer
-# - Removed blind searching if another track or folder exists
+# - Removed need for blind searching if another track or folder exists
 # - Added generation of the playlist at boot to only have folders with valid tracks to prevent lockups
+#   - Altered to be semi-background to speed up startup time. Playlist is slowly populated between 
+#     track and folder changes, until folder count is met, or all files have been accounted for
 # - Added colours to various states to give more visual feedback
 # - made the button monitoring timer based, to simplify the main loop
 # - converted the main loop into a state machine
@@ -35,14 +37,21 @@
 # - added support for large folders (4 digit filename). Folders with 256 tracks or more can only be
 #   in the range of 01-15. The folder must have more than 255 tracks for the code to automatically
 #   switch to using 4 digit names.
+#   - folders outside teh 1-15 range are artifically capped to 255 files during playlist generation
 # - Added support for track and album randomization
 
 # Known issues:
-# - if there is a gap in folder names, some folders after the gaps may be mised
+# - if there is a gap in folder names, some folders after the gaps may be missed
 #   -- solution, either scan for all 99 possibilities (slow), or make the caviat that folder names cannot
 #      be skipped, but folders can be left empty (easier)
-# -  turning pot off during AM playback can cause the code to hang
-#   -- need timeouts on the comms with the DFPlayer so we don't wait forever
+
+# TODO:
+# - add "all tracks" shuffle, when enabled disable long-press/album advance
+#   internally encode tracks and albums as a continuous sequence
+#   menas a littel searching will need to be done to determine album
+#   but should be quick, since it's just a matter of looping and subtracting track counts
+#   from the number, until the number is less than the curent folders track count.
+# - do background scanning for folders and files for fasster startup
 
 import micropython
 import time, machine
@@ -112,7 +121,14 @@ playlist_restore_trk = 0
 playlist_restore_seed = 0
 
 # Dynamically determines the playlist from the contents of the SD 
-def generate_playlist(folders = -1):
+def generate_playlist(folders = -1, files = -1):
+    if files == -1:
+        files = dfp.get_total_files()
+
+    if files == 0:
+        print("SDCard has no files")
+        return
+
     if folders == -1:
         folders = dfp.get_folder_count()
 
@@ -124,12 +140,22 @@ def generate_playlist(folders = -1):
     print("Scanning: ", end="")
     
     for dir in range(folders):
-        files = dfp.get_file_count(dir + 1)
-        if files:
+        tracks = dfp.get_file_count(dir + 1)
+
+        if tracks:
             print("+", end="")
-            playlist.add(dir+1, files)
+
+            # only folders 1-15 can have more than 255 tracks
+            if (dir > 14) and (tracks > 255):
+                tracks = 255
+
+            playlist.add(dir+1, tracks)
+            files -= tracks
         else:
             print(".",end="")
+        if files == 0:
+            print("!",end="")
+            break
     print("")
     playlist.freeze()
 
@@ -287,7 +313,7 @@ def app_start_up(last):
     print("Filesystem has", total, "files in", folders, "folders")
     #time.sleep_ms(Timing.Guard)
 
-    generate_playlist(folders)
+    generate_playlist(folders, files=total)
 
     # no point in continuing if there are no music files
     if playlist.is_empty():
@@ -341,6 +367,12 @@ def app_play(last):
             return State.PLAY_NEXT
         else:
             print(f"Album {album:02d} Track {track:03d} playback complete")
+            # do quick scan of a couple of folders here if we haven't completed the scan yet
+            # we scan until all foders have been visited or all files have been found
+            # whichever comes first
+
+            # TODO: Scan for more folders here
+
         if Config.LED.ENABLE:
             led.color(App.Colors.IDLE)
         app_wait(App.Timing.GUARD)
@@ -417,13 +449,17 @@ def app_next_album(last):
     print(f"Now Playing: Album {album:02d} Track {track:03d}")
 
     if App.Effects.ENABLE and App.Effects.ON_ALBUM:
+        button.stop() # stop the button monitor during WAV playback
         fade_and_play_effect(album, track, large=large)
+        button.start() # restart teh button monitor
     else:
         # no transition effect, emulate a normal transition
         dfp.stop()
         if Config.LED.ENABLE:
             led.color(App.Colors.IDLE)
         app_wait(App.Timing.GUARD)
+
+        # TODO scan for more folders here
 
         dfp.play_folder_track(album, track, large=large)
     
@@ -526,7 +562,6 @@ def app_media_load(last):
     total = dfp.get_total_files()
 
     print("Filesystem has", total, "files in", folders, "folders")
-    #time.sleep_ms(Timing.Guard)
 
     generate_playlist(folders)
 
@@ -563,7 +598,6 @@ def fade_and_play_effect(folder, track, large=False):
     if Config.LED.ENABLE:
         led.color(App.Colors.PLAYING_WAV)
 
-
     print(f"PWM Audio: starting  '{Config.Audio.FILE}'")
     wav.play(fade_in=Config.Audio.FADE_IN, fade_out=Config.Audio.FADE_OUT)
 
@@ -574,35 +608,31 @@ def fade_and_play_effect(folder, track, large=False):
     fade_out_delay = max(int((Config.DFPlayer.FADE_OUT * 1000) / (fade_out_steps - 1)), 40)
     play_vol = min(30, Config.DFPlayer.VOLUME)
 
-    # print(f"Fade Debug: Time: {(Config.DFPlayer.FADE * 1000)}ms Delay: {fade_delay}ms steps: {fade_steps}")
-
-    # t_stop_out = 0
     if not dfp.is_stopped(): # track is currently playing, fade it out, then stop
         # fade out the old track
         try:
             vol = play_vol
-            #print(f"Fade-Out Volume [{vol} ", end="")
 
             t_start = time.ticks_ms()
             for step in range(fade_out_steps):
                 vol = play_vol - int((play_vol / fade_out_steps) * step)
-                #print(">", end="")
                 dfp.volume(vol)
 
                 t_next = fade_out_delay * step
                 while time.ticks_diff(time.ticks_ms(), t_start) < t_next:
                     app_wait(App.Timing.MAIN)
-            #print(f" {vol}]")
-            # t_stop_out = time.ticks_diff(time.ticks_ms(), t_start)
 
-        except OSError:
+        except DFPlayer.Error:
             print(" DFPlayer stopped unexpectedly")
             wav.stop()
+            if dfp.is_online():
+                dfp.set_offline()
             return
-        finally:
-            dfp.volume(0)
-            if not dfp.is_stopped():
-                dfp.stop()
+        except: # bubble up any other exceptions
+            raise
+        dfp.volume(0)
+        if not dfp.is_stopped():
+            dfp.stop()
 
     # start playing the new track
     try:
@@ -615,31 +645,29 @@ def fade_and_play_effect(folder, track, large=False):
     # fade in the new track
     try:
         vol = 0
-        #print(f"Fade-In Volume [{vol} ", end="")
         t_start = time.ticks_ms()
         for step in range(fade_in_steps):
             vol = int((play_vol / fade_in_steps) * step)
-            #print(">", end="")
             dfp.volume(vol)
 
             t_next = fade_in_delay * step
             while time.ticks_diff(time.ticks_ms(), t_start) < t_next:
                 app_wait(App.Timing.MAIN)
-        #print(f" {vol}]")
-        # t_stop_in = time.ticks_diff(time.ticks_ms(), t_start)
 
         while wav.is_playing():
             app_wait(App.Timing.MAIN)
 
-    except OSError:
+    except DFPlayer.Error:
         print(" DFPlayer stopped unexpectedly")
         wav.stop()
+        if dfp.is_online():
+            dfp.set_offline()
         return
-    finally:
-        dfp.volume(play_vol)
-        wav.stop()
+    except: # bubble up any other exceptions
+        raise
 
-    # print(f"Actual Fade Times: Out: {t_stop_out}ms In: {t_stop_in}ms")
+    dfp.volume(play_vol)
+    wav.stop()
 
     if Config.LED.ENABLE:
         led.color(App.Colors.PLAYING_SONG)
@@ -650,7 +678,6 @@ def fade_and_play_effect(folder, track, large=False):
 # Load Resources
 # ****************************************************************************
 if App.Effects.ENABLE:
-    # micropython.mem_info()
     print(f"Loading Audio Data: '{Config.Audio.FILE}'")
     try:
         wav = WAV(Config.Audio.PIN, Config.Audio.FILE, Config.Audio.VOLUME, Config.Audio.CARRIER)
@@ -663,7 +690,6 @@ if App.Effects.ENABLE:
         duration = (1.0 * samps) / (1.0 * rate)
         rate = rate / 1000
         print(f"Audio Data: {rate}KHz {samps} samples / {duration:.2f}s" )
-    # micropython.mem_info()
 
 # ****************************************************************************
 # Main Loop

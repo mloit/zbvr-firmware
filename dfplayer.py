@@ -16,9 +16,6 @@
 #  (c) Copyright 2026 Mark Loit. All Rights Reserved.
 # ****************************************************************************
 
-# TODO:
-#  - Create custom exceptions and get rid of the generic OSErrors
-
 from machine import UART, Pin
 import time, micropython, machine
 
@@ -121,6 +118,10 @@ class DFresponse: # we only worry about non-command responses here (or where res
     FEEDBACK     = 0x41 # 41 00 00 00 -- SYNC Acknowledge response of "feedback flag" is sent (3.5.3)
 
 class DFerrors:
+    OFFLINE      = -4   # DFPlayer is offline (software stack)
+    BAD_MESSAGE  = -3   # unhandled message received (software stack)
+    BAD_ERROR    = -2   # unknown error message received (software stack)
+    TIMEOUT      = -1   # Timeut error (software stack)
     NONE         = 0x00 # "No error",
     BUSY         = 0x01 # "Module is Busy Initializing",
     SLEEPING     = 0x02 # "Currently in Sleep Mode",
@@ -145,6 +146,10 @@ class DFstatus:
 # Strings for terminal messages
 # ****************************************************************************
 DFerror_strings = {
+    -4:   "Offline",
+    -3:   "Unhandled Message Received",
+    -2:   "Unkown Error Code Received",
+    -1:   "Timeout",
     0x00: "No error",
     0x01: "Module is Busy Initializing",
     0x02: "Currently in Sleep Mode",
@@ -196,16 +201,6 @@ DFequalizer_strings = {
     5: "Bass"       # Bass optimized Eq
 }
 
-# class DFProtocolErrorException(Exception):
-#     """Raised when an error is received back"""
-
-#     def __init__(self, error, message):
-#         self.errno = error
-#         self.message = f"DFPlayer: "
-#         super().__init__(self.message)
-
-
-
 # ****************************************************************************
 # Protocol Constants
 # ****************************************************************************
@@ -245,7 +240,32 @@ class DFframe:
 # DFPlayer Hardware Implementation
 # ****************************************************************************
 class DFPlayer:
+    #TODO: REmove this in favour if a Log-level value passed into the constructor
     LOWLEVEL = False # include  packet level debgging messages
+
+
+    class Error(Exception):
+        """Base DFPlayer Error Exception"""
+        def __init__(self, message):
+            self.message = f"DFPlayer: {message}"
+            super().__init__(self.message)
+
+    class ProtocolError(Error):
+        """Raised when an unexpected error is received back"""
+        
+        def __init__(self, error, message = None):
+            self.errno = error
+            if message is None:
+                message = DFerror_strings[error]
+            super().__init__(f"Protocol Error: {message}")
+
+    class ProtocolTimeoutError(ProtocolError):
+        """Raised when a command or query times out"""
+
+        def __init__(self, message=DFerror_strings[DFerrors.TIMEOUT]):
+            super().__init__(DFerrors.TIMEOUT, f"Timeout Error: {message}")
+
+
 
     # constructor
     # uart: the UART unit ID (0 or 1)
@@ -256,7 +276,7 @@ class DFPlayer:
         # create and initialize out buffers
         self._sending  = bytearray(DFframe.LENGTH)
         self._received = bytearray(DFframe.LENGTH)
-        self._rxd = CircularBuffer(32)
+        self._rxd = CircularBuffer(64)
         self._sending[DFframe.STX] = DFframe.val.STX
         self._sending[DFframe.ETX] = DFframe.val.ETX
         self._sending[DFframe.VER] = DFframe.val.VER
@@ -277,6 +297,7 @@ class DFPlayer:
 
         self._wait_ack = False     # flag for when a command is waiting for an acknowledge
         self._waiting = False      # indicates a query call is waiting for a response
+        self._pending = False      # indicates an unprocessed packet is in the buffer
         self._query = DFcmd.NONE   # command that made the query call
 
         # initialize the UART
@@ -308,8 +329,10 @@ class DFPlayer:
             
             if not (val is None):
                 self._rxd.put(val[0])
-
-        micropython.schedule(self._packet_processor, None)
+        try:
+            micropython.schedule(self._packet_processor, None)
+        except:
+            self._pending = True
 
 # ****************************************************************************
 # Packet RX message handlers
@@ -328,10 +351,8 @@ class DFPlayer:
         if not (self._waiting or self._wait_ack):
             if errno < DFerrors.MAX_ERROR:
                 print("Unexpected Error Response: " + DFerror_strings[errno])
-                raise OSError(DFerror_strings[errno])
             else:
-                print(f"Unknown Error Response: Error{errno:02x}")
-                raise OSError("Error code out of range")
+                print(f"Unexpected and Unknown Error Response: Error{errno:02x}")
 
         # special case while booting (maybe)
         if (not self._online) and errno == DFerrors.BUSY:
@@ -376,6 +397,7 @@ class DFPlayer:
 # Packet RX message handling dispatcher
 # ****************************************************************************
     def _packet_processor(self, _):
+        self._pending = False
         # we have more time here to do stuff
         if self.LOWLEVEL:
             self._print("Received", self._rxd.size(), "bytes")
@@ -445,7 +467,6 @@ class DFPlayer:
         if cmd == DFresponse.SDC_PLAY: # SDC playback stopped
             return self._handle_play_stop(cmd, parhi, parlo)
 
-
         if cmd == DFresponse.STORAGE: # boot/storage messages (normal STORAGE responses are handled through the query mechanism)
             return self._handle_boot(parlo)
         
@@ -459,8 +480,7 @@ class DFPlayer:
         # if we got here, we got something unexpected
         self._received[DFframe.CMD] = cmd
         self._print("packet received:", self._received.hex(' '), "Valid: ", valid)
-        self._print("Unrecognized Message Code: " + hex(cmd))
-        raise OSError("Unhandled Message")
+        print(f"Unrecognized Message Code: 0x{cmd:02x} with data 0x{parhi:02x}{parlo:02x}")
 
 # ****************************************************************************
 # Packet validation
@@ -521,14 +541,14 @@ class DFPlayer:
     # sends a command without generating or waiting for an acknowledge
     def _send_command(self, cmd, arg = 0, wait = False):
         if (not self._online) or (self._no_media):
-            raise OSError("DFPlayer not online")
+            raise DFPlayer.ProtocolError(DFerrors.OFFLINE)
         
         self._send_frame(cmd, arg=arg, wait=wait)
 
     # sends a command, waits for the acknowledgement
     def _send_command_confirmed(self, cmd, arg = 0, timeout=_DF_ACK_TIMEOUT):
         if (not self._online) or (self._no_media):
-            raise OSError("DFPlayer not online")
+            raise DFPlayer.ProtocolError(DFerrors.OFFLINE)
         
         # note only confirms if _use_ack is True
         self._send_frame(cmd, arg=arg, ack=self._use_ack, wait=True)
@@ -541,20 +561,23 @@ class DFPlayer:
             self._df_sleep_wait(timeout) # wait the timeout period for an error response
             self._wait_ack = False
 
+        if self._pending: # we exited with a pending packet in the buffer, process it before proceeding
+            self._packet_processor(None)
+
         if self._wait_ack: # we timed out!
             self._wait_ack = False
             print(f"Command 0x{cmd:02x} timed out")
-            raise OSError("DFPlayer: Operation timed out")
+            raise DFPlayer.ProtocolTimeoutError()
 
         if self._has_error:
             errno = self._get_last_error()
             print(f"Command 0x{cmd:02x} failed with error:",DFerror_strings[errno])
-            raise OSError(DFerror_strings[errno])
+            raise DFPlayer.ProtocolError(errno)
 
     # sends a query, and waits for a response
     def _send_query(self, cmd, arg = 0, timeout=_DF_QUERY_TIMEOUT):
         if (not self._online) or (self._no_media):
-            raise OSError("DFPlayer not online")
+            raise DFPlayer.ProtocolError(DFerrors.OFFLINE)
         
         self._waiting = True
         self._query = cmd
@@ -564,15 +587,18 @@ class DFPlayer:
         while self._waiting and (time.ticks_diff(deadline, time.ticks_ms()) > 0):
             self._df_sleep_wait(_DF_FRAME_TIME // 2)
 
+        if self._pending: # we exited with a pending packet in the buffer, process it before proceeding
+            self._packet_processor(None)
+
         if self._waiting: # we timed out!
             self._waiting = False
             print(f"Query 0x{cmd:02x} timed out")
-            raise OSError("DFPlayer: Operation timed out")
+            raise DFPlayer.ProtocolTimeoutError()
 
         if self._has_error:
             errno = self._get_last_error()
             print(f"Query 0x{cmd:02x} failed with error:",DFerror_strings[errno])
-            raise OSError(DFerror_strings[errno])
+            raise DFPlayer.ProtocolError(errno)
 
     # returns and clears the last error received
     def _get_last_error(self):
@@ -621,7 +647,10 @@ class DFPlayer:
     #     SLEEP    = 0x0a # 0a 0? 00 00 -- set sleep mode
     def sleep(self):
         self._print("DF: sleep()")
-        self._send_command_confirmed(DFcmd.set.SLEEP)
+        try:
+            self._send_command_confirmed(DFcmd.set.SLEEP)
+        except:
+            raise
         #TODO: manage object state for sleeping
 
 # ****************************************************************************
@@ -642,7 +671,10 @@ class DFPlayer:
     def get_status(self):
         self._print("DF: get_status()")
 
-        self._send_query(DFcmd.query.STATUS)
+        try:
+            self._send_query(DFcmd.query.STATUS)
+        except:
+            raise
         return self._get_query_result()
 
     # get root file count for device (code seems to suggest this is total disk files)
@@ -668,7 +700,7 @@ class DFPlayer:
 
         count = bin(storage).count('1')
         if (count > 1) or (count == 0):
-            raise OSError("Invalid storage selection value")
+            raise DFPlayer.Error("Invalid storage selection value")
 
         if storage & DFstorage.SDC:
             cmd = DFcmd.query.SDC_TOTAL
@@ -677,9 +709,12 @@ class DFPlayer:
         elif storage & DFstorage.FLASH:
             cmd = DFcmd.query.FLASH_TOTAL
         else:
-            raise OSError("Invalid Storage Selector")
+            raise DFPlayer.Error("Invalid Storage Selector")
         
-        self._send_query(cmd)
+        try:
+            self._send_query(cmd)
+        except:
+            raise
         return self._get_query_result()
 
     # get current playing track number 
@@ -706,7 +741,7 @@ class DFPlayer:
 
         count = bin(storage).count('1')
         if (count > 1) or (count == 0):
-            raise OSError("Invalid storage selection value")
+            raise DFPlayer.Error("Invalid storage selection value")
 
         if storage & DFstorage.SDC:
             cmd = DFcmd.query.SDC_CUR
@@ -715,9 +750,12 @@ class DFPlayer:
         elif storage & DFstorage.FLASH:
             cmd = DFcmd.query.FLASH_CUR
         else:
-            raise OSError("Invalid Storage Selector")
+            raise DFPlayer.Error("Invalid Storage Selector")
         
-        self._send_query(cmd)
+        try:
+            self._send_query(cmd)
+        except:
+            raise
         return self._get_query_result()
 
     # get file count for the specified folder on the current drive
@@ -725,7 +763,10 @@ class DFPlayer:
     def get_file_count(self, folder):
         self._print(f"DF: get_file_count({folder:02d}) [{DFstorage_strings[self._storage & _STORAGE_MASK]}]")
 
-        self._send_query(DFcmd.query.GET_TRACKS, arg=folder, timeout=_DF_FILE_QUERY_TIMEOUT)
+        try:
+            self._send_query(DFcmd.query.GET_TRACKS, arg=folder, timeout=_DF_FILE_QUERY_TIMEOUT)
+        except:
+            raise
         return self._get_query_result()
 
     # get folder count for the current drive
@@ -735,7 +776,10 @@ class DFPlayer:
     def get_folder_count(self):
         self._print(f"DF: get_folder_count() [{DFstorage_strings[self._storage & _STORAGE_MASK]}]")
 
-        self._send_query(DFcmd.query.GET_FOLDERS, timeout=_DF_FILE_QUERY_TIMEOUT)
+        try:
+            self._send_query(DFcmd.query.GET_FOLDERS, timeout=_DF_FILE_QUERY_TIMEOUT)
+        except:
+            raise
         return self._get_query_result() - 1
 
 # ****************************************************************************
@@ -747,7 +791,10 @@ class DFPlayer:
     def play(self):
         self._print("DF: play()")
 
-        self._send_command_confirmed(DFcmd.device.PLAY)
+        try:
+            self._send_command_confirmed(DFcmd.device.PLAY)
+        except:
+            raise
 
         if self._status <= DFstatus.PAUSED:
             self._status = DFstatus.PLAYING
@@ -758,7 +805,10 @@ class DFPlayer:
     def pause(self):
         self._print("DF: pause()")
 
-        self._send_command_confirmed(DFcmd.device.PAUSE)
+        try:
+            self._send_command_confirmed(DFcmd.device.PAUSE)
+        except:
+            raise
 
         if self._status <= DFstatus.PAUSED:
             self._status = DFstatus.PAUSED
@@ -769,7 +819,10 @@ class DFPlayer:
     def stop(self):
         self._print("DF: stop()")
 
-        self._send_command_confirmed(DFcmd.device.STOP)
+        try:
+            self._send_command_confirmed(DFcmd.device.STOP)
+        except:
+            raise
 
         self._status = DFstatus.STOPPED
 
@@ -777,7 +830,10 @@ class DFPlayer:
     def previous(self):
         self._print("DF: previous()")
 
-        self._send_command_confirmed(DFcmd.device.PREV)
+        try:
+            self._send_command_confirmed(DFcmd.device.PREV)
+        except:
+            raise
 
         self._status = DFstatus.PLAYING
 
@@ -785,7 +841,10 @@ class DFPlayer:
     def next(self):
         self._print("DF: next()")
 
-        self._send_command_confirmed(DFcmd.device.NEXT)
+        try:
+            self._send_command_confirmed(DFcmd.device.NEXT)
+        except:
+            raise
 
         self._status = DFstatus.PLAYING
 
@@ -793,7 +852,10 @@ class DFPlayer:
     def play_disk_random(self):
         self._print("DF: play_disk_random()")
 
-        self._send_command_confirmed(DFcmd.device.RANDOM)
+        try:
+            self._send_command_confirmed(DFcmd.device.RANDOM)
+        except:
+            raise
 
         self._status = DFstatus.PLAYING
 
@@ -802,7 +864,10 @@ class DFPlayer:
     def play_disk_track(self, track):
         self._print(f"DF: play_disk_track({track:04d})")
 
-        self._send_command_confirmed(DFcmd.play.DISK, arg = track)
+        try:
+            self._send_command_confirmed(DFcmd.play.DISK, arg = track)
+        except:
+            raise
 
         self._status = DFstatus.PLAYING
 
@@ -810,7 +875,10 @@ class DFPlayer:
     def play_mp3_track(self, track):
         self._print(f"DF: play_mp3_track({track:04d})")
 
-        self._send_command_confirmed(DFcmd.play.MP3, arg = track)
+        try:
+            self._send_command_confirmed(DFcmd.play.MP3, arg = track)
+        except:
+            raise
 
         self._status = DFstatus.PLAYING
 
@@ -823,7 +891,10 @@ class DFPlayer:
         self._print(f"DF: play_folder_track({folder:02d}, {track:03d})")
 
         combined = ((folder & 0x00ff) << 8) + (track & 0x00ff)
-        self._send_command_confirmed(DFcmd.play.FOLDER, arg = combined)
+        try:
+            self._send_command_confirmed(DFcmd.play.FOLDER, arg = combined)
+        except:
+            raise
 
         self._status = DFstatus.PLAYING
 
@@ -832,7 +903,10 @@ class DFPlayer:
         self._print(f"DF: play_large_folder_track({folder:02d}, {track:04d})")
 
         combined = ((folder & 0x000f) << 12) + (track & 0x0fff)
-        self._send_command_confirmed(DFcmd.play.BIG, arg = combined)
+        try:
+            self._send_command_confirmed(DFcmd.play.BIG, arg = combined)
+        except:
+            raise
 
         self._status = DFstatus.PLAYING
 
@@ -842,8 +916,11 @@ class DFPlayer:
         self._print(f"DF: play_advert({track:04d})")
 
         if self._status != DFstatus.PLAYING:
-            raise OSError("DFPlayer not currently playing")
-        self._send_command_confirmed(DFcmd.advert.PLAY, arg = track)
+            raise DFPlayer.Error("DFPlayer not currently playing")
+        try:
+            self._send_command_confirmed(DFcmd.advert.PLAY, arg = track)
+        except:
+            raise
 
         self._status = DFstatus.INSERTING
 
@@ -852,8 +929,11 @@ class DFPlayer:
         self._print("DF: stop_advert()")
 
         if self._status < DFstatus.INSERTING:
-            raise OSError("DFPlayer not currently playing advert")
-        self._send_command_confirmed(DFcmd.advert.STOP)
+            raise DFPlayer.Error("DFPlayer not currently playing advert")
+        try:
+            self._send_command_confirmed(DFcmd.advert.STOP)
+        except:
+            raise
 
         self._status = DFstatus.PLAYING
 
@@ -865,7 +945,10 @@ class DFPlayer:
     def loop_one(self, track):
         self._print(f"DF: loop_one({track:04d})")
 
-        self._send_command_confirmed(DFcmd.loop.DISK_ONE, arg = track)
+        try:
+            self._send_command_confirmed(DFcmd.loop.DISK_ONE, arg = track)
+        except:
+            raise
         self._status = DFstatus.PLAYING
 
     # starts continuous play of all tracks on the disk
@@ -873,7 +956,10 @@ class DFPlayer:
     def loop_all_start(self):
         self._print("DF: loop_all_start()")
 
-        self._send_command_confirmed(DFcmd.loop.DISK_ALL, arg = DFenable.YES)
+        try:
+            self._send_command_confirmed(DFcmd.loop.DISK_ALL, arg = DFenable.YES)
+        except:
+            raise
         self._status = DFstatus.PLAYING
 
     # stops continuous play of all tracks on the disk
@@ -881,7 +967,10 @@ class DFPlayer:
     def loop_all_stop(self):
         self._print("DF: loop_all_stop()")
 
-        self._send_command_confirmed(DFcmd.loop.DISK_ALL, arg = DFenable.NO)
+        try:
+            self._send_command_confirmed(DFcmd.loop.DISK_ALL, arg = DFenable.NO)
+        except:
+            raise
         self._status = DFstatus.STOPPED
 
     # continuously play the tracks in the specified folder
@@ -889,7 +978,10 @@ class DFPlayer:
     def loop_folder(self, folder):
         self._print(f"DF: loop_folder({folder:02d})")
 
-        self._send_command_confirmed(DFcmd.loop.FOLDER, arg = folder)
+        try:
+            self._send_command_confirmed(DFcmd.loop.FOLDER, arg = folder)
+        except:
+            raise
         self._status = DFstatus.PLAYING
 
     # start continuous of the current track
@@ -897,14 +989,20 @@ class DFPlayer:
     def loop_current_enable(self):
         self._print("DF: loop_current_enable()")
 
-        self._send_command_confirmed(DFcmd.loop.CURRENT, arg = DFenable.YES)
+        try:
+            self._send_command_confirmed(DFcmd.loop.CURRENT, arg = DFenable.YES)
+        except:
+            raise
 
     # stop continuous of the current track
     #     CURRENT  19 0? 00 0x -- x=0 enable; x=1 disable; set repeat current track (3.6.13)
     def loop_current_disable(self):
         self._print("DF: loop_current_disable()")
 
-        self._send_command_confirmed(DFcmd.loop.CURRENT, arg = DFenable.NO)
+        try:
+            self._send_command_confirmed(DFcmd.loop.CURRENT, arg = DFenable.NO)
+        except:
+            raise
 
 # ****************************************************************************
 # Volume and Amplifier
@@ -914,7 +1012,10 @@ class DFPlayer:
     def get_volume(self):
         self._print("DF: get_volume()")
 
-        self._send_query(DFcmd.query.GET_VOL)
+        try:
+            self._send_query(DFcmd.query.GET_VOL)
+        except:
+            raise
         return self._get_query_result()
 
     # incerase the current volume
@@ -922,14 +1023,20 @@ class DFPlayer:
     def volume_up(self):
         self._print("DF: volume_up()")
 
-        self._send_command_confirmed(DFcmd.volume.UP)
+        try:
+            self._send_command_confirmed(DFcmd.volume.UP)
+        except:
+            raise
 
     # decrease the current volume
     #     DN       05 0? 00 00 -- decrease volume
     def volume_down(self):
         self._print("DF: vol_down()")
 
-        self._send_command_confirmed(DFcmd.volume.DN)
+        try:
+            self._send_command_confirmed(DFcmd.volume.DN)
+        except:
+            raise
 
     # set the current volume
     #     SET      06 0? 00 xx -- volume 0-30 (3.6.2)
@@ -937,7 +1044,10 @@ class DFPlayer:
         vol = max(0, min(30, vol)) # clamp the value to the valid range
         self._print(f"DF: volume({vol})")
 
-        self._send_command_confirmed(DFcmd.volume.SET, arg = vol)
+        try:
+            self._send_command_confirmed(DFcmd.volume.SET, arg = vol)
+        except:
+            raise
 
     # enable the amplifier
     #     AMP      10 0? AA GG -- MSB=1: amp on (AA: 0-1); LSB: gain (GG: 0-31)
@@ -945,25 +1055,37 @@ class DFPlayer:
         gain = max(0, min(31, gain)) # clamp the value to the valid range
         self._print(f"DF: enable_amp({gain})")
         gain = gain | 0x0100 # set the amp enable bit
-        self._send_command_confirmed(DFcmd.set.AMP, arg = gain)
+        try:
+            self._send_command_confirmed(DFcmd.set.AMP, arg = gain)
+        except:
+            raise
 
     # disable the amplifier
     #     AMP      10 0? AA GG -- MSB=1: amp on (AA: 0-1); LSB: gain (GG: 0-31)
     def disable_amp(self, gain):
         self._print("DF: disable_amp()")
-        self._send_command_confirmed(DFcmd.volume.SET)
+        try:
+            self._send_command_confirmed(DFcmd.volume.SET)
+        except:
+            raise
 
     # enable the DAC
     #     DAC      1a 0? 00 0x -- x=0 enable; x=1 disable; set DAC (3.6.14)
     def enable_dac(self):
         self._print("DF: enable_dac()")
-        self._send_command_confirmed(DFcmd.set.DAC, arg = DFenable_neg.YES)
+        try:
+            self._send_command_confirmed(DFcmd.set.DAC, arg = DFenable_neg.YES)
+        except:
+            raise
 
     # disable the DAC
     #     DAC      1a 0? 00 0x -- x=0 enable; x=1 disable; set DAC (3.6.14)
     def disable_dac(self):
         self._print("DF: disable_dac()")
-        self._send_command_confirmed(DFcmd.set.DAC, arg = DFenable_neg.NO)
+        try:
+            self._send_command_confirmed(DFcmd.set.DAC, arg = DFenable_neg.NO)
+        except:
+            raise
 
 # ****************************************************************************
 # Equalizer
@@ -973,7 +1095,10 @@ class DFPlayer:
     def get_equalizer(self):
         self._print("DF: get_equalizer()")
 
-        self._send_query(DFcmd.query.GET_EQ)
+        try:
+            self._send_query(DFcmd.query.GET_EQ)
+        except:
+            raise
         return self._get_query_result()
 
     # set the equalizer mode
@@ -983,7 +1108,10 @@ class DFPlayer:
             eq = 0
         self._print(f"DF: equalizer({DFequalizer_strings[eq]})")
 
-        self._send_command_confirmed(DFcmd.set.EQ, arg = eq)
+        try:
+            self._send_command_confirmed(DFcmd.set.EQ, arg = eq)
+        except:
+            raise
 
 # ****************************************************************************
 # Storage Device
@@ -993,7 +1121,10 @@ class DFPlayer:
     def get_storage(self):
         self._print("DF: get_storage()")
 
-        self._send_query(DFcmd.query.STORAGE)
+        try:
+            self._send_query(DFcmd.query.STORAGE)
+        except:
+            raise
         return self._get_query_result()
 
     # set the storage device: (note only a single big can be set in the parameter)
@@ -1006,22 +1137,31 @@ class DFPlayer:
 
         count = bin(sto).count('1')
         if (count > 1) or (count == 0):
-            raise OSError("Invalid storage selection value")
-        self._send_command_confirmed(DFcmd.set.SOURCE, arg = sto)
+            raise DFPlayer.Error("Invalid storage selection value")
+        try:
+            self._send_command_confirmed(DFcmd.set.SOURCE, arg = sto)
+        except:
+            raise
 
     # sets the current drive to be the USB storage
     #     SOURCE   09 0? 00 0x -- param: storage (3.6.4)
     def select_usb(self):
         self._print("DF: select_usb()")
 
-        self._send_command_confirmed(DFcmd.set.SOURCE, arg = DFstorage.USB)
+        try:
+            self._send_command_confirmed(DFcmd.set.SOURCE, arg = DFstorage.USB)
+        except:
+            raise
 
     # sets the current drive to be the SDC storage
     #     SOURCE   09 0? 00 0x -- param: storage (3.6.4)
     def select_sdc(self):
         self._print("DF: select_sdc()")
 
-        self._send_command_confirmed(DFcmd.set.SOURCE, arg = DFstorage.SDC)
+        try:
+            self._send_command_confirmed(DFcmd.set.SOURCE, arg = DFstorage.SDC)
+        except:
+            raise
 
 # ****************************************************************************
 # Status and State

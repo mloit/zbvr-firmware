@@ -127,7 +127,8 @@ class Controls:
                 trigger = True             # force an event
 
         # test for a state, change. if so count it
-        if cur != self._button:
+        last = self._button
+        if cur != last:
             self._isr_count += 1
             if self._isr_count >= self._intervals:
                 # we met the threshold, so update the state
@@ -140,11 +141,15 @@ class Controls:
             self._isr_count = 0
         
         if trigger:
-            micropython.schedule(self._event_processor, cur)
+            try:
+                micropython.schedule(self._event_processor, cur)
+            except: # if we can't schedule the event we'll skip this one
+                self._button = last # restore the state so we can trigger it on the next cycle, hopefully
+                pass 
 
     # event processor
     # triggered by the polling isr on a state change
-    # determins the button event from the state changes
+    # determines the button event from the state changes
     # posts the event on final release
     def _event_processor(self, state):
         now = time.ticks_ms()

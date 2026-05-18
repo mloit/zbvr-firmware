@@ -15,10 +15,6 @@
 #  (c) Copyright 2026 Mark Loit. All Rights Reserved.
 # ****************************************************************************
 
-# TODO: 
-#  - Optimize away the division in the ISR?
-#  - Fix up exception handling and raising, create custom exception class
-
 from machine import Pin, PWM, Timer
 import ustruct
 
@@ -150,16 +146,22 @@ class WAV:
         if duty > 65535:
             duty = 65535
 
-        pwm.duty_u16(duty)
+        try:
+            pwm.duty_u16(duty)
+        except:
+            self._isr_done = True
+            return
 
         self._isr_index = idx + 1
 
     # play the loaded wav file
-    def play(self, fade_in=0.0, fade_out=0.0):
+    def play(self, fade_in=0.0, fade_out=0.0, start=0.0):
 
         # reset the state
         self._isr_done = False
-        self._isr_index = 0
+
+        start_sample = int(self._rate * start)
+        self._isr_index = min(self._data_len, start_sample)
 
         # if fade time exceeds play_time, proportionatly adjust the fades
         if (fade_in > 0) and (fade_out > 0):
