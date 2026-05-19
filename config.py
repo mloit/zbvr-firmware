@@ -20,6 +20,7 @@ print("Loading Config")
 # ****************************************************************************
 # Application Configuration
 # ****************************************************************************
+#TODO: make shuffle mode an enum like Equalizer settings
 class App:
     class Playlist:
         # Attempt to presserve album and track index in the playlist between (pot) power-cycles
@@ -36,6 +37,18 @@ class App:
 
         # Shuffle order in which albums are played
         ALBUM_SHUFFLE    = False
+
+        # Shuffle all music
+        # note this feature overrides the CYCLE_ALBUMS and both track and album shuffle options as they no longer
+        # apply. This feature also disables recognition of the long press on the button as now everything is treated
+        # as one big album
+        FULL_SHUFFLE     = False
+
+        # Shuffle alternate folders
+        # odd numbered folders (01,03,05...) will be played sequentially
+        # even numbered folders (02, 04, 06...) will be shuffled
+        # Note: this setting has no effect if TRACK_SHUFFLE is True 
+        ALTERNATE_SHUFFLE = True
 
     class Effects:
         # enables the use of the PWM Audio module,

@@ -149,7 +149,7 @@ def generate_playlist(folders = -1, files = -1):
             if (dir > 14) and (tracks > 255):
                 tracks = 255
 
-            playlist.add(dir+1, tracks)
+            playlist.add(dir+1, tracks, ((dir & 1) == 1) and App.Playlist.ALTERNATE_SHUFFLE)
             files -= tracks
         else:
             print(".",end="")
@@ -163,7 +163,7 @@ def generate_playlist(folders = -1, files = -1):
     print("playlist contains", albums, "albums")
     pl = playlist.all()
     for entry in pl:
-        print(f"album: {entry[0]:02d} - {entry[1]} tracks")
+        print(f"album: {entry[0]:02d} - {entry[1]} tracks [{entry[2]}]")
 
 # ****************************************************************************
 # State Machine

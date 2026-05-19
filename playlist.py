@@ -24,6 +24,7 @@ print("Loading Module: Playlist")
 # positional values for the data in playlist[]
 ALBUM_ID  = 0
 TRACKS    = 1
+SHUFFLE   = 2
 
 # max number of files before it's considered a large folder
 FOLDER_THRESHOLD = 255
@@ -52,12 +53,19 @@ class Playlist:
         album_order    = []    # play order (when shuffling) for albums
         track_order    = []    # play order (when shuffling) for tracks in the current album
 
-    def __init__(self, advance_folder=False, shuffle_tracks=False, shuffle_albums=False):
+    def __init__(self, advance_folder=False, shuffle_tracks=False, shuffle_albums=False, shuffle_all=False):
         self._state = Playlist.State()
-        self._advance_folder = advance_folder
-        self._shuffle_albums = shuffle_albums
-        self._shuffle_tracks = shuffle_tracks
-        self.playlist = []   # list of entries stored as a tuple (album_id, tracks)
+        self._shuffle_all = shuffle_all
+        if shuffle_all == True:
+            self._advance_folder = False
+            self._shuffle_albums = False
+            self._shuffle_tracks = False
+        else:
+            self._advance_folder = advance_folder
+            self._shuffle_albums = shuffle_albums
+            self._shuffle_tracks = shuffle_tracks
+
+        self.playlist = []   # list of entries stored as a tuple (album_id, tracks, shuffle)
         self._frozen = False
 
     # perform the Fisher-Yates Shuffle
@@ -93,7 +101,7 @@ class Playlist:
         self._state.track_order = self._do_shuffle(deck)
 
     # adds an album to the playlist tracks must be non-zero
-    def add(self, album, tracks:int):
+    def add(self, album, tracks:int, shuffle=False):
         if tracks == 0:
             raise ValueError("Playlist Cannot add albums with zero tracks")
         if self._frozen:
@@ -101,7 +109,7 @@ class Playlist:
         # self._state.is_empty = False
         self._state.album_count += 1
         self._state.file_count += tracks
-        self.playlist.append((album, tracks))
+        self.playlist.append((album, tracks, shuffle or self._shuffle_tracks))
 
     # freezes the playlist, preventing furhter additions
     # if shuffling is enabled, shuffles are performed now
@@ -112,7 +120,8 @@ class Playlist:
         # shuffle if necessary
         if self._shuffle_albums:
             self._do_shuffle_albums()
-        if self._shuffle_tracks:
+        #if self._shuffle_tracks:
+        if self.playlist[self._state.album][SHUFFLE]:
             self._do_shuffle_tracks()
 
     # returns a tuple with the current (album id, track id) -- does not advance the state
@@ -125,7 +134,8 @@ class Playlist:
             album_idx = self._state.album_order[album_idx]
 
         track_idx = self._state.track
-        if self._shuffle_tracks:
+        #if self._shuffle_tracks:
+        if self.playlist[self._state.album][SHUFFLE]:
             track_idx = self._state.track_order[track_idx]
 
         return self.playlist[album_idx][ALBUM_ID], track_idx + 1
@@ -149,7 +159,8 @@ class Playlist:
                 if album >= self._state.album_count:
                     album = 0
                 self._state.album = album
-                if self._shuffle_tracks:
+                #if self._shuffle_tracks:
+                if self.playlist[self._state.album][SHUFFLE]:
                     self._do_shuffle_tracks()
             track = 0
         self._state.track = track
@@ -172,7 +183,8 @@ class Playlist:
                 if album < 0:
                     album += self._state.album_count
                 self._state.album = album
-                if self._shuffle_tracks:
+                #if self._shuffle_tracks:
+                if self.playlist[self._state.album][SHUFFLE]:
                     self._do_shuffle_tracks()
                 track = 0
         self._state.track = track
@@ -188,7 +200,8 @@ class Playlist:
         if album < 0:
             album += self._state.album_count
         self._state.album = album
-        if self._shuffle_tracks:
+        #if self._shuffle_tracks:
+        if self.playlist[self._state.album][SHUFFLE]:
             self._do_shuffle_tracks()
         self._state.track = 0         # reset track index
         return self.current()
@@ -203,7 +216,8 @@ class Playlist:
         if album >= self._state.album_count:
             album = 0
         self._state.album = album
-        if self._shuffle_tracks:
+        #if self._shuffle_tracks:
+        if self.playlist[self._state.album][SHUFFLE]:
             self._do_shuffle_tracks()
         self._state.track = 0         # reset track index
         return self.current()
@@ -265,7 +279,8 @@ class Playlist:
             raise OSError("Playlist: List is empty")
         
         idx = self._state.track
-        if self._shuffle_tracks:
+        #if self._shuffle_tracks:
+        if self.playlist[self._state.album][SHUFFLE]:
             idx = self._state.track_order[idx]
         return idx + 1 # track id is index + 1
 
@@ -278,18 +293,18 @@ class Playlist:
         self._advance_folder = enable
 
     # set the shuffle state for albums
-    def shuffle_albums(self, enable):
-        if self._shuffle_albums:
-            return
-        self._shuffle_albums = enable
-        self._do_shuffle_albums()
+    # def shuffle_albums(self, enable):
+    #     if self._shuffle_albums:
+    #         return
+    #     self._shuffle_albums = enable
+    #     self._do_shuffle_albums()
 
     # set the shuffle state for tracks
-    def shuffle_tracks(self, enable):
-        if self._shuffle_tracks:
-            return
-        self._shuffle_tracks = enable
-        self._do_shuffle_tracks()
+    # def shuffle_tracks(self, enable):
+    #     if self._shuffle_tracks:
+    #         return
+    #     self._shuffle_tracks = enable
+    #     self._do_shuffle_tracks()
 
     # forces a reshuffle of the albums and tracks
     def reshuffle(self):
