@@ -25,30 +25,56 @@ class App:
     class Playlist:
         # Attempt to presserve album and track index in the playlist between (pot) power-cycles
         # only works as long as the RP remains powered, and the contents of the SD don't change
-        # to the point of invalidating the index values
+        # to the point of invalidating the index values. (USB power must remain present between power events)
+        # Default Setting: True
         PRESEVE          = True
 
         # Once the last track of an album has played, the defult behaviour (False) is to restart the same album
-        # setting this option to true will cause it to advance to the next album
+        # setting this option to true will cause it to advance to the next album. Once the last album is reached
+        # it will cycle back to the first
+        # Default Setting: False
         CYCLE_ALBUMS     = False
 
         # Shuffle playback of tracks within an album
+        # Default Setting: False
         TRACK_SHUFFLE    = False
 
         # Shuffle order in which albums are played
+        # Default Setting: False
         ALBUM_SHUFFLE    = False
 
+        # Shuffle alternate albums
+        # odd numbered albums (01,03,05...) will be played sequentially
+        # even numbered albums (02, 04, 06...) will be shuffled
+        # Note: this setting has no effect if TRACK_SHUFFLE is True 
+        # Default Setting: False
+        ALTERNATE_SHUFFLE = False
+
         # Shuffle all music
-        # note this feature overrides the CYCLE_ALBUMS and both track and album shuffle options as they no longer
-        # apply. This feature also disables recognition of the long press on the button as now everything is treated
-        # as one big album
+        # treats the entire music library on the SD card as a single large album.
+        # This feature also changes the function of the long button press from advancing albums (as there is 
+        # effectioively only one) to reshuffling and restarting the playlist at the start
+        # NOTE: this feature overrides the CYCLE_ALBUMS and the track, album, and alternate, shuffle options 
+        #       as they no longer apply.
+        # Default Setting: False
         FULL_SHUFFLE     = False
 
-        # Shuffle alternate folders
-        # odd numbered folders (01,03,05...) will be played sequentially
-        # even numbered folders (02, 04, 06...) will be shuffled
-        # Note: this setting has no effect if TRACK_SHUFFLE is True 
-        ALTERNATE_SHUFFLE = False
+        # reshuffle playlist on restarts
+        # When set to true, this option causes albums to be reshuffled when the playlist (disk or album)
+        # loops back to the start.
+        # Default Setting: True
+        RESHUFFLE        = False
+
+        # Faster startup.
+        # This feature when set true causes music to start playing before the disk has been fully scanned
+        # for valid folders and tracks. This has some side effects in that the first track played on initial
+        # power-up will always come from the first folder found, regardless of shuffle mode used. It may also 
+        # result in extended delay when advancing folders if the scan has not completed and the user attempts 
+        # to fast advance to a later folder. 
+        # When set to false, startup is a bit slower as a full scan of the SD card contents is performed before 
+        # playback begins. This can feel unreasonably long with large collections on the disk
+        # Default Setting: True
+        QUCKSTART        = True
 
     class Effects:
         # enables the use of the PWM Audio module,
