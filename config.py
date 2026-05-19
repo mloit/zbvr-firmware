@@ -48,7 +48,7 @@ class App:
         # odd numbered folders (01,03,05...) will be played sequentially
         # even numbered folders (02, 04, 06...) will be shuffled
         # Note: this setting has no effect if TRACK_SHUFFLE is True 
-        ALTERNATE_SHUFFLE = True
+        ALTERNATE_SHUFFLE = False
 
     class Effects:
         # enables the use of the PWM Audio module,
