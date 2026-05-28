@@ -34,3 +34,7 @@ class LED:
     def color(self, RGBval = (63,63,63)):
         self._np[0] = RGBval
         self._np.write()
+    
+    # sets the color to black (all off)
+    def off(self):
+        self.color((0,0,0))
