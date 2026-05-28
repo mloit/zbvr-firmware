@@ -20,7 +20,6 @@ print("Loading Config")
 # ****************************************************************************
 # Application Configuration
 # ****************************************************************************
-#TODO: make shuffle mode an enum like Equalizer settings
 class App:
     class Playlist:
         # Attempt to presserve album and track index in the playlist between (pot) power-cycles
@@ -54,7 +53,7 @@ class App:
         # treats the entire music library on the SD card as a single large album.
         # This feature also changes the function of the long button press from advancing albums (as there is 
         # effectioively only one) to reshuffling and restarting the playlist at the start
-        # NOTE: this feature overrides the CYCLE_ALBUMS and the track, album, and alternate, shuffle options 
+        # NOTE: this feature overrides the CYCLE_ALBUMS and the TRACK_SHUFFLE, ALBUM_SHUFFLE, and ALTERNATE_SHUFFLE options 
         #       as they no longer apply.
         # Default Setting: False
         FULL_SHUFFLE     = False
@@ -62,15 +61,15 @@ class App:
         # reshuffle playlist on restarts
         # When set to true, this option causes albums to be reshuffled when the playlist (disk or album)
         # loops back to the start.
-        # Default Setting: True
-        RESHUFFLE        = False
+        # Default Setting: False
+        AUTO_RESHUFFLE   = False
 
         # Faster startup.
         # This feature when set true causes music to start playing before the disk has been fully scanned
         # for valid folders and tracks. This has some side effects in that the first track played on initial
         # power-up will always come from the first folder found, regardless of shuffle mode used. It may also 
         # result in extended delay when advancing folders if the scan has not completed and the user attempts 
-        # to fast advance to a later folder. 
+        # to advance to a folder not scanned in yet. 
         # When set to false, startup is a bit slower as a full scan of the SD card contents is performed before 
         # playback begins. This can feel unreasonably long with large collections on the disk
         # Default Setting: True
