@@ -39,7 +39,8 @@
 #   switch to using 4 digit names.
 #   - folders outside the 1-15 range are artifically capped to 255 files during playlist generation
 # - Added support for track and album randomization
-# - added "all tracks" shuffle, when enabled disable long-press reshuffles and starts over
+# - added "all tracks" shuffle, when enabled long-press reshuffles and starts over instead of advancing album
+# - added a quickstart mode to do background scanning for albums in order to get faster boot time
 
 # Known issues:
 # - if there is a gap in folder names, some folders after the gaps may be missed in the scan as we only scan
@@ -48,7 +49,6 @@
 #      are scanned and used
 
 # TODO:
-# - do background scanning for folders and files for fasster startup
 # - use exception bubbling to handle common/repeated code conditions, when the normal flow needs to break
 #   - handle "offline" to prompt the reset code from the main loop, instead of repeating in each state
 #   - handle "not found" in normal playback to trigger a rescan of the media
@@ -120,11 +120,21 @@ playlist = Playlist(advance_folder = App.Playlist.CYCLE_ALBUMS,
 
 # state vars for managing/restiring the playlist between sessions
 restore_playlist = False
-dfp_folders      = -1
-dfp_tracks       = -1
+dfp_folders      = -1     # number of folders reported on disk
+dfp_tracks       = -1     # number of tracks reported on disk
+is_scanning      = False  # flag set if background folder scan is in progress
+scan_index       = 0      # current folder index of scan
+scan_remain      = 0      # number of remaining files to be found
 
 # Dynamically determines the playlist from the contents of the SD 
 def generate_playlist(folders = -1, files = -1):
+    global is_scanning, scan_index, scan_remain
+
+    # turn off background scan if we end up in here
+    is_scanning = False
+    scan_index  = 0
+    scan_remain = 0
+
     if files == -1:
         files = dfp.get_total_files()
 
@@ -161,12 +171,95 @@ def generate_playlist(folders = -1, files = -1):
             break
     print("")
     playlist.prepare()
+    display_playlist()
 
+# visually displays the playlist contents
+def display_playlist():
     albums = playlist.get_albums()
-    print("playlist contains", albums, "albums")
+    tracks = playlist.get_total_tracks()
+    print(f"playlist contains {albums} albums and a total of {tracks} tracks")
     pl = playlist.all()
     for entry in pl:
         print(f"album: {entry[0]:02d} - {entry[1]} tracks [{entry[2]}]")
+
+
+# functions for background playlist scanning
+# initialize the background scanning
+def scan_init(folders = -1, files = -1):
+    global is_scanning, scan_index, scan_remain, dfp_tracks, dfp_folders
+    if files == -1:
+        files = dfp.get_total_files()
+
+    if files == 0:
+        print("SDCard has no files")
+        return
+
+    if folders == -1:
+        folders = dfp.get_folder_count()
+
+    if folders == 0:
+        print("SDCard has no folders")
+        return
+
+    if is_scanning: # if flag set, we attempt to resume the scan
+        print("Resuming Discovery")
+        return
+
+    print("Discovering playlist (background scan)")
+    dfp_tracks  = files
+    dfp_folders = folders
+    scan_remain = files
+    scan_index  = 0
+    is_scanning = True
+
+
+# keeps scanning until one album is found
+def scan_find():
+    global is_scanning, scan_index, scan_remain, dfp_tracks, dfp_folders
+
+    print("Scanning: ", end="")
+    for dir in range(scan_index, dfp_folders):
+        tracks = dfp.get_file_count(dir + 1)
+        scan_index = dir + 1
+        if tracks:
+            print("+", end="")
+            # only folders 1-15 can have more than 255 tracks
+            if (dir > 14) and (tracks > 255):
+                tracks = 255
+
+            playlist.add(dir+1, tracks, ((dir & 1) == 1) and App.Playlist.ALTERNATE_SHUFFLE)
+            scan_remain -= tracks
+            break
+        else:
+            print(".",end="")
+    print("")
+    if (scan_remain == 0) or (scan_index >= dfp_folders):
+        print("Playlist Discovery complete")
+        is_scanning = False
+
+# checks a single album candidate
+def scan_one():
+    global is_scanning, scan_index, scan_remain, dfp_tracks, dfp_folders
+
+    print("Probing: ", end="")
+    dir = scan_index
+    scan_index += 1
+    tracks = dfp.get_file_count(dir + 1)
+    
+    if tracks:
+        print("+")
+        # only folders 1-15 can have more than 255 tracks
+        if (dir > 14) and (tracks > 255):
+            tracks = 255
+
+        playlist.add(dir+1, tracks, ((dir & 1) == 1) and App.Playlist.ALTERNATE_SHUFFLE)
+        scan_remain -= tracks
+    else:
+        print(".")
+
+    if (scan_remain == 0) or (scan_index >= dfp_folders):
+        print("Playlist Discovery complete")
+        is_scanning = False
 
 # ****************************************************************************
 # State Machine
@@ -285,7 +378,7 @@ states[State.MEDIA_CHECK] = app_media_check
 # button handler set-up on exit
 # non looping, one pass, and it advances
 def app_start_up(last):
-    global dfp_folders, dfp_tracks
+    global dfp_folders, dfp_tracks, is_scanning
 
     if power_sense.value() == 0:
         print("Power Off Detected")
@@ -306,9 +399,16 @@ def app_start_up(last):
             playlist.clear()
 
     if rebuild:
-        generate_playlist(folders)
-        dfp_folders = folders
-        dfp_tracks = total
+        if App.Playlist.QUCKSTART:
+            scan_init(folders, total)
+            scan_find()
+            playlist.prepare()
+            if not is_scanning:
+                display_playlist()
+        else:
+            generate_playlist(folders, total)
+            dfp_folders = folders
+            dfp_tracks = total
 
     # no point in continuing if there are no music files
     if playlist.is_empty():
@@ -359,11 +459,6 @@ def app_play(last):
             return State.PLAY_NEXT
         else:
             print(f"Album {album:02d} Track {track:03d} playback complete")
-            # do quick scan of a couple of folders here if we haven't completed the scan yet
-            # we scan until all foders have been visited or all files have been found
-            # whichever comes first
-
-            # TODO: Scan for more folders here
 
         if Config.LED.ENABLE:
             led.color(App.Colors.IDLE)
@@ -377,6 +472,8 @@ states[State.PLAY_TRACK] = app_play
 # normal loop body
 # sets up next track to play
 def app_next(last):
+    global is_scanning
+
     if last == State.PLAY_NEXT:
         return State.PLAY_TRACK
     
@@ -397,6 +494,16 @@ def app_next(last):
             album, track = playlist.current()
         else:
             print(" -- Long button press detected: Next Album")
+            # special case for when advancing albums, and next album not available yet
+            if playlist.is_last_album():
+                dfp.stop()
+                if Config.LED.ENABLE:
+                    led.color(App.Colors.IDLE)
+                app_wait(App.Timing.GUARD)
+                scan_find()
+                playlist.prepare()
+                if not is_scanning:
+                    display_playlist()
             album, track = playlist.next_album()
         print(f"Changing to: Album {album:02d} Track {track:03d}")
         return State.NEXT_ALBUM
@@ -408,6 +515,11 @@ def app_next(last):
         if Config.LED.ENABLE:
             led.color(App.Colors.IDLE)
         app_wait(App.Timing.GUARD)
+
+    # at this point the track should be stopped, so we can scan if necessary
+    was_scanning = is_scanning
+    if is_scanning:
+        scan_one()
 
     if evt == Controls.Event.TRIPLE: # restart album
         print(" -- Triple button press detected: Restarting Album")
@@ -423,6 +535,9 @@ def app_next(last):
 
     print(f"Now Playing: Album {album:02d} Track {track:03d}")
     dfp.play_folder_track(album,track, large=playlist.is_large_album())
+
+    if was_scanning and (not is_scanning):
+        display_playlist()
 
     return State.PLAY_TRACK
 
