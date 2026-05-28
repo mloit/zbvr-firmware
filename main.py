@@ -37,21 +37,22 @@
 # - added support for large folders (4 digit filename). Folders with 256 tracks or more can only be
 #   in the range of 01-15. The folder must have more than 255 tracks for the code to automatically
 #   switch to using 4 digit names.
-#   - folders outside teh 1-15 range are artifically capped to 255 files during playlist generation
+#   - folders outside the 1-15 range are artifically capped to 255 files during playlist generation
 # - Added support for track and album randomization
+# - added "all tracks" shuffle, when enabled disable long-press reshuffles and starts over
 
 # Known issues:
-# - if there is a gap in folder names, some folders after the gaps may be missed
-#   -- solution, either scan for all 99 possibilities (slow), or make the caviat that folder names cannot
-#      be skipped, but folders can be left empty (easier)
+# - if there is a gap in folder names, some folders after the gaps may be missed in the scan as we only scan
+#   the number of reported folders
+#   -- solution: folder names cannot be skipped, but folders can be left empty, to ensure all used folders
+#      are scanned and used
 
 # TODO:
-# - add "all tracks" shuffle, when enabled disable long-press/album advance
-#   internally encode tracks and albums as a continuous sequence
-#   menas a littel searching will need to be done to determine album
-#   but should be quick, since it's just a matter of looping and subtracting track counts
-#   from the number, until the number is less than the curent folders track count.
 # - do background scanning for folders and files for fasster startup
+# - use exception bubbling to handle common/repeated code conditions, when the normal flow needs to break
+#   - handle "offline" to prompt the reset code from the main loop, instead of repeating in each state
+#   - handle "not found" in normal playback to trigger a rescan of the media
+
 
 import micropython
 import time, machine
@@ -113,12 +114,14 @@ if Config.I2C.ENABLE:
 # ****************************************************************************
 playlist = Playlist(advance_folder = App.Playlist.CYCLE_ALBUMS, 
                     shuffle_albums = App.Playlist.ALBUM_SHUFFLE, 
-                    shuffle_tracks = App.Playlist.TRACK_SHUFFLE)
+                    shuffle_tracks = App.Playlist.TRACK_SHUFFLE,
+                    shuffle_all    = App.Playlist.FULL_SHUFFLE,
+                    auto_reshuffle = App.Playlist.AUTO_RESHUFFLE)
 
+# state vars for managing/restiring the playlist between sessions
 restore_playlist = False
-playlist_restore_idx = -1
-playlist_restore_trk = 0
-playlist_restore_seed = 0
+dfp_folders      = -1
+dfp_tracks       = -1
 
 # Dynamically determines the playlist from the contents of the SD 
 def generate_playlist(folders = -1, files = -1):
@@ -157,7 +160,7 @@ def generate_playlist(folders = -1, files = -1):
             print("!",end="")
             break
     print("")
-    playlist.freeze()
+    playlist.prepare()
 
     albums = playlist.get_albums()
     print("playlist contains", albums, "albums")
@@ -215,23 +218,6 @@ def app_idle(last):
     return State.IDLE
 
 states[State.IDLE] = app_idle
-
-# ****************************************************************************
-# power was already on, send reset, advance to boot
-def app_warm_boot(last):
-    if last != State.WARM_BOOT:
-        return State.BOOT
-
-    # TODO: Add a boot attempt counter, and cycle to an error state if we exceend 
-    # the count
-    # raise OSError("Too many failed boot attempts") 
-
-    # send a reset to the DFPlayer
-    dfp.reset()
-
-    return State.BOOT
-
-states[State.BOOT] = app_warm_boot
 
 # ****************************************************************************
 # power was turned on, wait for DFPlayer to boot. 
@@ -299,7 +285,7 @@ states[State.MEDIA_CHECK] = app_media_check
 # button handler set-up on exit
 # non looping, one pass, and it advances
 def app_start_up(last):
-    global restore_playlist, playlist_state
+    global dfp_folders, dfp_tracks
 
     if power_sense.value() == 0:
         print("Power Off Detected")
@@ -313,7 +299,16 @@ def app_start_up(last):
     print("Filesystem has", total, "files in", folders, "folders")
     #time.sleep_ms(Timing.Guard)
 
-    generate_playlist(folders, files=total)
+    rebuild = False
+    if (not App.Playlist.PRESEVE) or (folders != dfp_folders) or (total != dfp_tracks):
+        rebuild = True
+        if not playlist.is_empty():
+            playlist.clear()
+
+    if rebuild:
+        generate_playlist(folders)
+        dfp_folders = folders
+        dfp_tracks = total
 
     # no point in continuing if there are no music files
     if playlist.is_empty():
@@ -321,9 +316,6 @@ def app_start_up(last):
         raise OSError("No Music Found")
     
     # If this is a warm power-up, we can optionally continue where we left-off
-    if App.Playlist.PRESEVE and restore_playlist:
-        playlist.set_state(playlist_state)
-    restore_playlist = False
     
     print("\n" + "*" * 40 + "\n")
 
@@ -398,9 +390,14 @@ def app_next(last):
 
     # check for Long Press first, we don't want the stop and pause effect
     # of a normal transition, so we can fade out and in with the AM Radio sound
-    if evt == Controls.Event.LONG: # next album
-        print(" -- Long button press detected: Next Album")
-        album, track = playlist.next_album()
+    if evt == Controls.Event.LONG: # next album, or reshuffle
+        if App.Playlist.FULL_SHUFFLE:
+            print(" -- Long button press detected: Reshuffling")
+            playlist.reshuffle()
+            album, track = playlist.current()
+        else:
+            print(" -- Long button press detected: Next Album")
+            album, track = playlist.next_album()
         print(f"Changing to: Album {album:02d} Track {track:03d}")
         return State.NEXT_ALBUM
     
@@ -487,11 +484,8 @@ def app_power_down(last):
     # inform the DFPlayer object that power is off
     dfp.set_offline()
 
-    # invalidate the playlist, preserving state for possible restoration
-    # in case SDCard was removed when we power-down, don't try to overwrite the existing saved state
-    if not restore_playlist:
-        restore_playlist = True
-        playlist_state = playlist.get_state()
+    # invalidate the playlist, if not set to preserve it
+    if not App.Playlist.PRESEVE:
         playlist.clear()
 
     print("Power-Down")
@@ -514,9 +508,9 @@ def app_media_wait(last):
     if last != State.MEDIA_WAIT:
         button.stop()
 
-        restore_playlist = True
-        playlist_state = playlist.get_state()
-        playlist.clear()
+        # invalidate the playlist, if not set to preserve it
+        if not App.Playlist.PRESEVE:
+            playlist.clear()
         
         print("SDCard was removed, waiting for SDCard")
         if Config.LED.ENABLE:
@@ -546,11 +540,11 @@ states[State.MEDIA_WAIT] = app_media_wait
 
 # ****************************************************************************
 # SD Card was re-inserted
-# rebuild playlist
+# rebuild playlist - can safely do a full scan here
 # restart button
 # resume playing
 def app_media_load(last):
-    global restore_playlist, playlist_state
+    global dfp_folders, dfp_tracks
 
     if power_sense.value() == 0:
         print("Power Off Detected")
@@ -563,18 +557,22 @@ def app_media_load(last):
 
     print("Filesystem has", total, "files in", folders, "folders")
 
-    generate_playlist(folders)
+    rebuild = False
+    if (not App.Playlist.PRESEVE) or (folders != dfp_folders) or (total != dfp_tracks):
+        rebuild = True
+        if not playlist.is_empty():
+            playlist.clear()
+
+    if rebuild:
+        generate_playlist(folders)
+        dfp_folders = folders
+        dfp_tracks = total
 
     # no point in continuing if there are no music files
     if playlist.get_albums() == 0:
         print("No albums or tracks found... Exiting")
         raise OSError("No Music Found")
-    
-    # If this is a warm power-up, we can optionally continue where we left-off
-    if App.Playlist.PRESEVE and restore_playlist:
-        playlist.set_state(playlist_state)
-    restore_playlist = False
-    
+
     # start by playing the first album & track, with AM radio effect
     album, track = playlist.current()
 
@@ -704,6 +702,9 @@ def main():
 
     print(f"\nBooting Retro Radio Baseline {_VERSION}\n")
 
+    if App.Playlist.FULL_SHUFFLE:
+        print("Full Disk Shuffle Mode Enabled")
+
     if power_sense.value() == 1:
         app_state = State.BOOT
         dfp.reset()
@@ -722,7 +723,8 @@ def main():
             app_state = State.MEDIA_WAIT
 
         current = app_state
-        app_state = states[app_state](last)
+        # TODO: Wrap this in try/except
+        app_state = states[current](last)
         last = current
         time.sleep_ms(App.Timing.MAIN)
 # main never exits
