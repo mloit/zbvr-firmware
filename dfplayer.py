@@ -259,7 +259,13 @@ class DFPlayer:
                 message = DFerror_strings[error]
             super().__init__(f"Protocol Error: {message}")
 
-    class ProtocolTimeoutError(ProtocolError):
+
+    class NotFoundError(ProtocolError):
+        """Raised when attempting to play a file returns Not Found"""
+        def __init__(self, message=DFerror_strings[DFerrors.NOT_FOUND]):
+            super().__init__(DFerrors.NOT_FOUND, f"Timeout Error: {message}")
+
+    class TimeoutError(ProtocolError):
         """Raised when a command or query times out"""
 
         def __init__(self, message=DFerror_strings[DFerrors.TIMEOUT]):
@@ -567,11 +573,13 @@ class DFPlayer:
         if self._wait_ack: # we timed out!
             self._wait_ack = False
             print(f"Command 0x{cmd:02x} timed out")
-            raise DFPlayer.ProtocolTimeoutError()
+            raise DFPlayer.TimeoutError()
 
         if self._has_error:
             errno = self._get_last_error()
             print(f"Command 0x{cmd:02x} failed with error:",DFerror_strings[errno])
+            if errno == DFerrors.NOT_FOUND:
+                raise DFPlayer.NotFoundError()
             raise DFPlayer.ProtocolError(errno)
 
     # sends a query, and waits for a response
@@ -593,7 +601,7 @@ class DFPlayer:
         if self._waiting: # we timed out!
             self._waiting = False
             print(f"Query 0x{cmd:02x} timed out")
-            raise DFPlayer.ProtocolTimeoutError()
+            raise DFPlayer.TimeoutError()
 
         if self._has_error:
             errno = self._get_last_error()
