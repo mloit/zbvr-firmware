@@ -41,6 +41,7 @@
 # - Added support for track and album randomization
 # - added "all tracks" shuffle, when enabled long-press reshuffles and starts over instead of advancing album
 # - added a quickstart mode to do background scanning for albums in order to get faster boot time
+# - added watchdog timer to reset in case of full crashes
 
 # Known issues:
 # - if there is a gap in folder names, some folders after the gaps may be missed in the scan as we only scan
@@ -697,7 +698,6 @@ def fade_and_play_effect(folder, track, large=False):
 
     print(f"PWM Audio: starting  '{Config.Audio.FILE}'")
     wav.play(fade_in=Config.Audio.FADE_IN, fade_out=Config.Audio.FADE_OUT)
-    print("DEBUG: Entering MP3 Fade Loops")
 
     # doesn't make sense to have more steps than actual adjustment resolution
     fade_in_steps  = min(30, min(Config.DFPlayer.STEPS_IN, Config.DFPlayer.VOLUME)) # max of 30 steps
@@ -707,7 +707,6 @@ def fade_and_play_effect(folder, track, large=False):
     play_vol = min(30, Config.DFPlayer.VOLUME)
 
     if not dfp.is_stopped(): # track is currently playing, fade it out, then stop
-        print("Fading Out")
         # fade out the old track
         try:
             vol = play_vol
@@ -729,6 +728,8 @@ def fade_and_play_effect(folder, track, large=False):
             wav.stop()
             raise
 
+    wdt.feed()
+
     # start playing the new track
     try:
         dfp.play_folder_track(folder, track, large=large)
@@ -740,7 +741,6 @@ def fade_and_play_effect(folder, track, large=False):
 
     # fade in the new track
     try:
-        print("Fading In")
         vol = 0
         t_start = time.ticks_ms()
         for step in range(fade_in_steps):
@@ -760,6 +760,7 @@ def fade_and_play_effect(folder, track, large=False):
         raise
 
     wav.stop()
+    wdt.feed()
 
     if Config.LED.ENABLE:
         led.color(App.Colors.PLAYING_SONG)
@@ -785,6 +786,9 @@ if App.Effects.ENABLE:
 # ****************************************************************************
 # Start the Watchdog Timer
 # ****************************************************************************
+# startup teh watchdog with a 7.5 second timeout
+# once started it cannot be stopped, so must periodically call feed()
+# before the timeout is reached
 wdt = WDT(timeout=7500)
 wdt.feed()
 
@@ -888,10 +892,11 @@ if __name__ == "__main__":
                 wdt.feed()
         print("resetting in 1 second")
         wdt.feed()
-        time.sleep_ms(1000)
         if Config.LED.ENABLE:
             led.color(App.Colors.WARNING)
+        time.sleep_ms(1000)
 
+    wdt.feed()
     if is_host_attached():
         machine.soft_reset() # software only reset (maintains REPL connection)
     else:
