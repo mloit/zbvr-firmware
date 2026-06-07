@@ -647,7 +647,7 @@ states[State.MEDIA_WAIT] = app_media_wait
 # restart button
 # resume playing
 def app_media_load(last):
-    global dfp_folders, dfp_tracks
+    global dfp_folders, dfp_tracks, is_scanning
 
     if last == State.MEDIA_LOAD:
         return State.PLAY_TRACK
@@ -664,12 +664,19 @@ def app_media_load(last):
             playlist.clear()
 
     if rebuild:
-        generate_playlist(folders)
-        dfp_folders = folders
-        dfp_tracks = total
+        if App.Playlist.QUCKSTART:
+            scan_init(folders, total)
+            scan_find()
+            playlist.prepare()
+            if not is_scanning:
+                display_playlist()
+        else:
+            generate_playlist(folders, total)
+            dfp_folders = folders
+            dfp_tracks = total
 
     # no point in continuing if there are no music files
-    if playlist.get_albums() == 0:
+    if playlist.is_empty():
         print("No albums or tracks found... Exiting")
         raise OSError("No Music Found")
 
@@ -796,7 +803,7 @@ wdt.feed()
 # Main Loop
 # ****************************************************************************
 def main():
-    global app_state
+    global app_state, dfp_folders, dfp_tracks
 
     print("")
     print("*" * 40)
@@ -841,6 +848,8 @@ def main():
             if Config.LED.ENABLE:
                 led.color(App.Colors.WARNING)
             playlist.clear()
+            dfp_folders = 0
+            dfp_tracks = 0
             app_state = State.MEDIA_LOAD
         except: # anything else we crash into the error handler 
             raise
