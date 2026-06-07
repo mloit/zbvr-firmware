@@ -71,7 +71,7 @@ class Controls:
         self._min_press = short_press    # minimum press time to filter out accidental presses
         self._max_press = long_press     # anything longer than this is registered as a long press
         self._max_gap = tap_gap          # max amount of time between presses to register as multi-tap action
-        
+
         # timer related
         self._running = False            # true when the timer is initialized and running
         self._tmr = Timer()
@@ -79,7 +79,7 @@ class Controls:
         # debouncing
         self._isr_count = 0
         self._button = False             # debounced value
-        
+
         # event processor internal
         self._in_event = False
         self._event_start = 0
@@ -100,7 +100,7 @@ class Controls:
         # debouncing
         self._isr_count = 0
         self._button = False             # debounced value
-        
+
         # event processor internal
         self._in_event = False
         self._event_start = 0
@@ -139,13 +139,12 @@ class Controls:
                 cur = self._button 
         else: # start over
             self._isr_count = 0
-        
+
         if trigger:
             try:
                 micropython.schedule(self._event_processor, cur)
             except: # if we can't schedule the event we'll skip this one
                 self._button = last # restore the state so we can trigger it on the next cycle, hopefully
-                pass 
 
     # event processor
     # triggered by the polling isr on a state change

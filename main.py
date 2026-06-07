@@ -29,7 +29,7 @@
 # - Added colours to various states to give more visual feedback
 # - made the button monitoring timer based, to simplify the main loop
 # - converted the main loop into a state machine
-# - added exception handling to main, to clean up nicely on a crash or when Thonny stops the program
+# - added exception handling to main, to clean up nicely on a crash or when a debugger stops the program
 # - added handling of live SD card removal and insertion
 # - added ability to change the equalizer setting
 # - WAV playback can now fade in and out for softer edge transitions
@@ -48,15 +48,9 @@
 #   -- solution: folder names cannot be skipped, but folders can be left empty, to ensure all used folders
 #      are scanned and used
 
-# TODO:
-# - use exception bubbling to handle common/repeated code conditions, when the normal flow needs to break
-#   - handle "offline" to prompt the reset code from the main loop, instead of repeating in each state
-#   - handle "not found" in normal playback to trigger a rescan of the media
-
-
 import micropython
 import time, machine
-from machine import Pin, I2C
+from machine import Pin, I2C, WDT
 
 # enable optimizations for all our code
 micropython.opt_level(3)
@@ -69,7 +63,7 @@ from dfplayer import DFPlayer, DFequalizer_strings, DFequalizer
 from controls import Controls
 from playlist import Playlist
 
-_VERSION = "26.0.1 BETA"
+_VERSION = "26.0.1"
 
 lev = micropython.opt_level()
 print(f"\nMicroPython Optimization Level: {lev}")
@@ -108,6 +102,25 @@ if Config.I2C.ENABLE:
               sda  = Config.I2C.Pins.SDA, 
               scl  = Config.I2C.Pins.SCL, 
               freq = Config.I2C.RATE)
+
+# ****************************************************************************
+# REPL/Host Connection 
+# ****************************************************************************
+# determinse if a USB Serial or REPL connection is established, otherwise we are 
+# just powered
+def is_host_attached():
+    # USB Serial Interface Status Register address for the RP2040
+    SIE_STATUS_REG = 0x50110000 + 0x50
+
+    # Bitmask flags for the register
+    SIE_CONNECTED = 1 << 16
+    SIE_SUSPENDED = 1 << 4
+
+    # Read the memory address directly
+    reg_val = machine.mem32[SIE_STATUS_REG]
+
+    # Device is connected actively if CONNECTED is true and SUSPENDED is false
+    return (reg_val & (SIE_CONNECTED | SIE_SUSPENDED)) == SIE_CONNECTED
 
 # ****************************************************************************
 # Playlist Handling
@@ -151,9 +164,10 @@ def generate_playlist(folders = -1, files = -1):
 
     print("Discovering playlist")
     print("Scanning: ", end="")
-    
+
     for dir in range(folders):
         tracks = dfp.get_file_count(dir + 1)
+        wdt.feed()
 
         if tracks:
             print("+", end="")
@@ -181,7 +195,6 @@ def display_playlist():
     pl = playlist.all()
     for entry in pl:
         print(f"album: {entry[0]:02d} - {entry[1]} tracks [{entry[2]}]")
-
 
 # functions for background playlist scanning
 # initialize the background scanning
@@ -212,7 +225,6 @@ def scan_init(folders = -1, files = -1):
     scan_index  = 0
     is_scanning = True
 
-
 # keeps scanning until one album is found
 def scan_find():
     global is_scanning, scan_index, scan_remain, dfp_tracks, dfp_folders
@@ -220,6 +232,8 @@ def scan_find():
     print("Scanning: ", end="")
     for dir in range(scan_index, dfp_folders):
         tracks = dfp.get_file_count(dir + 1)
+        wdt.feed()
+
         scan_index = dir + 1
         if tracks:
             print("+", end="")
@@ -245,7 +259,7 @@ def scan_one():
     dir = scan_index
     scan_index += 1
     tracks = dfp.get_file_count(dir + 1)
-    
+
     if tracks:
         print("+")
         # only folders 1-15 can have more than 255 tracks
@@ -319,13 +333,11 @@ def app_boot(last):
         print("Waiting for DFPlayer to come online")
         if Config.LED.ENABLE:
             led.color(App.Colors.WAITING)
-    if power_sense.value() == 0:
-        print("Power Off Detected")
-        return State.POWER_DN
+
     if dfp.is_online():
         print("DFPlayer online, ready to proceed")
         return State.MEDIA_CHECK
-    
+
     return State.BOOT
 
 states[State.BOOT] = app_boot
@@ -333,11 +345,6 @@ states[State.BOOT] = app_boot
 # ****************************************************************************
 # DFPlayer is booted, check for media, wait if necessary
 def app_media_check(last):
-
-    if power_sense.value() == 0:
-        print("Power Off Detected")
-        return State.POWER_DN
-
     if last != State.MEDIA_CHECK:
         no_card = not dfp.has_sdc()
         print("SDCard ", end="")
@@ -354,7 +361,7 @@ def app_media_check(last):
 
     last_hint = time.ticks_ms()
     while not dfp.has_sdc():
-
+        # exit out if power was turned off
         if power_sense.value() == 0:
             print("Power Off Detected")
             return State.POWER_DN
@@ -380,9 +387,6 @@ states[State.MEDIA_CHECK] = app_media_check
 def app_start_up(last):
     global dfp_folders, dfp_tracks, is_scanning
 
-    if power_sense.value() == 0:
-        print("Power Off Detected")
-        return State.POWER_DN
     if last == State.START_UP:
         return State.PLAY_TRACK
 
@@ -390,7 +394,6 @@ def app_start_up(last):
     total = dfp.get_total_files()
 
     print("Filesystem has", total, "files in", folders, "folders")
-    #time.sleep_ms(Timing.Guard)
 
     rebuild = False
     if (not App.Playlist.PRESEVE) or (folders != dfp_folders) or (total != dfp_tracks):
@@ -414,14 +417,14 @@ def app_start_up(last):
     if playlist.is_empty():
         print("No albums or tracks found... Exiting")
         raise OSError("No Music Found")
-    
+
     # If this is a warm power-up, we can optionally continue where we left-off
-    
+
     print("\n" + "*" * 40 + "\n")
 
     dfp.equalizer(Config.DFPlayer.EQUALIZER)
     print("Equalizer Setting:", DFequalizer_strings[dfp.get_equalizer()])
- 
+
     # start by playing the first album & track, with AM radio effect
     album, track = playlist.current()
     large = playlist.is_large_album()
@@ -447,9 +450,6 @@ def app_play(last):
         print(" - Waiting for playback to complete")
         if Config.LED.ENABLE:
             led.color(App.Colors.PLAYING_SONG)
-    if power_sense.value() == 0:
-        print("Power Off Detected")
-        return State.POWER_DN
 
     # check if playback stopped naturally
     if (not dfp.is_playing()) or button.has_event():
@@ -476,11 +476,7 @@ def app_next(last):
 
     if last == State.PLAY_NEXT:
         return State.PLAY_TRACK
-    
-    if power_sense.value() == 0:
-        print("Power Off Detected")
-        return State.POWER_DN
-    
+
     evt = Controls.Event.NONE
     if button.has_event():
         evt = button.get_event()
@@ -507,7 +503,7 @@ def app_next(last):
             album, track = playlist.next_album()
         print(f"Changing to: Album {album:02d} Track {track:03d}")
         return State.NEXT_ALBUM
-    
+
     # check that we got here by a button press, if so emulate 
     # a normal transition
     if evt != Controls.Event.NONE:
@@ -549,10 +545,6 @@ states[State.PLAY_NEXT] = app_next
 def app_next_album(last):
     if last == State.NEXT_ALBUM:
         return State.PLAY_TRACK
-    
-    if power_sense.value() == 0:
-        print("Power Off Detected")
-        return State.POWER_DN
 
     # start by playing the first album & track, with AM radio effect
     album, track = playlist.current()
@@ -574,10 +566,9 @@ def app_next_album(last):
         # TODO scan for more folders here
 
         dfp.play_folder_track(album, track, large=large)
-    
+
     return State.PLAY_TRACK
 states[State.NEXT_ALBUM] = app_next_album
-
 
 # ****************************************************************************
 # power was turned off
@@ -594,7 +585,8 @@ def app_power_down(last):
     if Config.LED.ENABLE:
         led.color(App.Colors.IDLE)
 
-    button.stop() # stop the button monitor 
+    if button.is_runnning:
+        button.stop() # stop the button monitor 
 
     # inform the DFPlayer object that power is off
     dfp.set_offline()
@@ -616,17 +608,13 @@ states[State.POWER_DN] = app_power_down
 def app_media_wait(last):
     global restore_playlist, playlist_state
 
-    if power_sense.value() == 0:
-        print("Power Off Detected")
-        return State.POWER_DN
-
     if last != State.MEDIA_WAIT:
         button.stop()
 
         # invalidate the playlist, if not set to preserve it
         if not App.Playlist.PRESEVE:
             playlist.clear()
-        
+
         print("SDCard was removed, waiting for SDCard")
         if Config.LED.ENABLE:
             led.color(App.Colors.WAITING)
@@ -638,7 +626,7 @@ def app_media_wait(last):
         if power_sense.value() == 0:
             print("Power Off Detected")
             return State.POWER_DN
-        
+
         if time.ticks_diff(time.ticks_ms(), last_hint) > App.Timing.HINT:
             print(" - still waiting SDCard insertion")
             return State.MEDIA_WAIT
@@ -652,7 +640,6 @@ def app_media_wait(last):
 
 states[State.MEDIA_WAIT] = app_media_wait
 
-
 # ****************************************************************************
 # SD Card was re-inserted
 # rebuild playlist - can safely do a full scan here
@@ -661,9 +648,6 @@ states[State.MEDIA_WAIT] = app_media_wait
 def app_media_load(last):
     global dfp_folders, dfp_tracks
 
-    if power_sense.value() == 0:
-        print("Power Off Detected")
-        return State.POWER_DN
     if last == State.MEDIA_LOAD:
         return State.PLAY_TRACK
 
@@ -713,6 +697,7 @@ def fade_and_play_effect(folder, track, large=False):
 
     print(f"PWM Audio: starting  '{Config.Audio.FILE}'")
     wav.play(fade_in=Config.Audio.FADE_IN, fade_out=Config.Audio.FADE_OUT)
+    print("DEBUG: Entering MP3 Fade Loops")
 
     # doesn't make sense to have more steps than actual adjustment resolution
     fade_in_steps  = min(30, min(Config.DFPlayer.STEPS_IN, Config.DFPlayer.VOLUME)) # max of 30 steps
@@ -722,6 +707,7 @@ def fade_and_play_effect(folder, track, large=False):
     play_vol = min(30, Config.DFPlayer.VOLUME)
 
     if not dfp.is_stopped(): # track is currently playing, fade it out, then stop
+        print("Fading Out")
         # fade out the old track
         try:
             vol = play_vol
@@ -735,28 +721,26 @@ def fade_and_play_effect(folder, track, large=False):
                 while time.ticks_diff(time.ticks_ms(), t_start) < t_next:
                     app_wait(App.Timing.MAIN)
 
+            dfp.volume(0)
+            if not dfp.is_stopped():
+                dfp.stop()
+
         except DFPlayer.Error:
-            print(" DFPlayer stopped unexpectedly")
             wav.stop()
-            if dfp.is_online():
-                dfp.set_offline()
-            return
-        except: # bubble up any other exceptions
             raise
-        dfp.volume(0)
-        if not dfp.is_stopped():
-            dfp.stop()
 
     # start playing the new track
     try:
         dfp.play_folder_track(folder, track, large=large)
-    except:
+    except DFPlayer.NotFoundError:
         print(f"unable to start Album {folder:02d} Track {track:03d}")
         dfp.volume(play_vol) # exit with volume set to expected state
+        wav.stop()
         raise
 
     # fade in the new track
     try:
+        print("Fading In")
         vol = 0
         t_start = time.ticks_ms()
         for step in range(fade_in_steps):
@@ -770,22 +754,16 @@ def fade_and_play_effect(folder, track, large=False):
         while wav.is_playing():
             app_wait(App.Timing.MAIN)
 
+        dfp.volume(play_vol)
     except DFPlayer.Error:
-        print(" DFPlayer stopped unexpectedly")
         wav.stop()
-        if dfp.is_online():
-            dfp.set_offline()
-        return
-    except: # bubble up any other exceptions
         raise
 
-    dfp.volume(play_vol)
     wav.stop()
 
     if Config.LED.ENABLE:
         led.color(App.Colors.PLAYING_SONG)
     print(f"PWM Audio: '{Config.Audio.FILE}' playback complete")
-
 
 # ****************************************************************************
 # Load Resources
@@ -803,6 +781,12 @@ if App.Effects.ENABLE:
         duration = (1.0 * samps) / (1.0 * rate)
         rate = rate / 1000
         print(f"Audio Data: {rate}KHz {samps} samples / {duration:.2f}s" )
+
+# ****************************************************************************
+# Start the Watchdog Timer
+# ****************************************************************************
+wdt = WDT(timeout=7500)
+wdt.feed()
 
 # ****************************************************************************
 # Main Loop
@@ -827,6 +811,7 @@ def main():
 
     last = None
     while True:
+        wdt.feed()
         # basic loop logic
 
         # check power state, force power_down if power was lost
@@ -838,8 +823,23 @@ def main():
             app_state = State.MEDIA_WAIT
 
         current = app_state
-        # TODO: Wrap this in try/except
-        app_state = states[current](last)
+        try:
+            app_state = states[current](last)
+        except DFPlayer.TimeoutError:
+            # only a problem if power is actually still on
+            if power_sense.value() == 1:
+                raise
+            print("Power Off Detected")
+
+        except DFPlayer.NotFoundError:
+            # playlist must be out of sync, so force a rebuild
+            print("Playlist Syncronization Error")
+            if Config.LED.ENABLE:
+                led.color(App.Colors.WARNING)
+            playlist.clear()
+            app_state = State.MEDIA_LOAD
+        except: # anything else we crash into the error handler 
+            raise
         last = current
         time.sleep_ms(App.Timing.MAIN)
 # main never exits
@@ -847,18 +847,19 @@ def main():
 # ****************************************************************************
 # Cleanup Code
 # ****************************************************************************
-# function called on exit from an exception of from Thonny to shut things down cleanly
+# function called on exit from an exception of from debugger to shut things down cleanly
 def app_cleanup():
     if button.is_runnning:
         button.stop()
     if App.Effects.ENABLE and wav.is_playing():
         wav.stop()
     if dfp.is_online():
-        dfp.disable_reliability()
-        dfp.stop()
-        time.sleep_ms(20)
-        dfp.release()
- 
+        try:
+            dfp.disable_reliability()
+            dfp.stop()
+            time.sleep_ms(20)
+        finally:
+            dfp.set_offline()
 
 # ****************************************************************************
 # Entry Point
@@ -866,10 +867,10 @@ def app_cleanup():
 if __name__ == "__main__":
     try:
         main()
-    except KeyboardInterrupt: # this is when Thonny stops the code
+    except KeyboardInterrupt: # this is when teh debugger stops the code
         print("\nStopped by user")
         if Config.LED.ENABLE:
-            led.color(Config.LED.DEFAULT)
+            led.off()
         app_cleanup()
 
     except Exception as e:
@@ -878,10 +879,20 @@ if __name__ == "__main__":
             led.color(App.Colors.ERROR)
         app_cleanup()
         print("Waiting for power off to reset")
+        interval = 0
         while power_sense.value() == 1:
             time.sleep_ms(20)
+            interval += 1
+            if interval >= 50:
+                interval = 0
+                wdt.feed()
         print("resetting in 1 second")
+        wdt.feed()
         time.sleep_ms(1000)
         if Config.LED.ENABLE:
             led.color(App.Colors.WARNING)
-        machine.soft_reset() # software only reset
+
+    if is_host_attached():
+        machine.soft_reset() # software only reset (maintains REPL connection)
+    else:
+        machine.reset() # hard reset

@@ -110,7 +110,7 @@ class Deck:
     # returns true when there are no careds in the deck
     def is_empty(self):
         return (len(self._deck) == 0)
-    
+
     # returns true when no cards have been dealt yet
     def is_undealt(self):
         return (self._card < 0)
@@ -118,7 +118,7 @@ class Deck:
     # returns the number of cards in the deck
     def count(self):
         return len(self._deck)
-    
+
     # sets the shuffle enable for the deck
     def shuffle(self, shuffle):
         self._shuffle = shuffle
@@ -314,7 +314,7 @@ class Playlist:
     def is_large_album(self):
         if self.is_empty():
             raise OSError("Playlist: List is empty")
-        
+
         if self._dirty:
             self.prepare()
 
@@ -330,7 +330,7 @@ class Playlist:
     def current(self):
         if self.is_empty():
             raise OSError("Playlist: List is empty")
-        
+
         if self._dirty:
             self.prepare()
 
@@ -398,7 +398,7 @@ class Playlist:
     def next_album(self):
         if self.is_empty():
             raise OSError("Playlist: List is empty")
-        
+
         if self._shuffle_all:
             raise OSError("Cannot advance albums when FULL_SHUFFLE is enabled")
 
@@ -415,7 +415,7 @@ class Playlist:
     def previous_album(self):
         if self.is_empty():
             raise OSError("Playlist: List is empty")
-        
+
         if self._shuffle_all:
             raise OSError("Cannot advance albums when FULL_SHUFFLE is enabled")
 
@@ -451,7 +451,7 @@ class Playlist:
     # returns true if the current album is the last one in the playlist
     def is_last_album(self):
         return self.albums.is_last()
-    
+
     # retuns true if this is the last track of the last album
     def is_last(self):
         return (self.albums.is_last() and self.tracks.is_last())

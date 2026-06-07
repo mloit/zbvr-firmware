@@ -45,7 +45,7 @@ class WAV:
         self._lut      = self._build_table(self._volume)   # quick LUT for PWM duty during playback
         self._fade_in  = 0      # number of fade in samples
         self._fade_out = 0      # number of fade_out samples
-        self._isr_done = False
+        self._isr_done = True
         self._isr_index = 0
 
     def get_rate(self):
@@ -142,7 +142,7 @@ class WAV:
 
         if duty < 0:
             duty = 0
-        
+
         if duty > 65535:
             duty = 65535
 
