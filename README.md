@@ -1,6 +1,6 @@
 # Zion Brock Vintage Radio Firmware
 
-Baseline MicroPython firmware for the Zion Brock Vintage Radio. While we call it a "radio" that is by appearance and experience only. The device is really a basic MP3 player intended to mimic the feel of an old time AM Radio.
+MicroPython Firmware for the Zion Brock Vintage Radio. While we call it a "radio" that is by appearance and experience only. The device is really a basic MP3 player intended to mimic the feel of an old time AM Radio.
 
 See [Zion's website](https://www.zionbrock.com/radio) for more details on the radio, and the story behind it.
 
@@ -33,7 +33,7 @@ This firmware is a complete refactor of Zion's original `5.9.1` "Baseline" firmw
 
 Under normal operation the radio will begin by playing the first track of the first album (folder) on the SD card. (on first power-up) Tracks will be played in sequential order. Once the last track of an album is played, the radio will cycle back and restart from the first track of the same album. This behaviour can be modified through configuration options. (See [Customization](#customization) below for details)
 
-The radio has 2 control inputs. The volume knob on the front and the button on the top. The radio is turned on and off via the knob on the front. Fully counter-clockwise (past the `click`) turns the radio off. Turning clockwise past the `click` will turn it on. After that point the knob works as a traditional volume control. Clockwise louder, counter-clockwise quieter. When the radio is on, the LED on the front panel should be on as well.
+The radio has 2 control inputs. The volume knob on the front and the button on the top. The radio is turned on and off via the knob on the front. Fully counter-clockwise (past the click) turns the radio off. Turning clockwise past the click will turn it on. After that point the knob works as a traditional volume control. Clockwise louder, counter-clockwise quieter. When the radio is on, the LED on the front panel should be on as well.
 
 The top button affects playback. 
 - 1 short press: Play next track
@@ -41,7 +41,7 @@ The top button affects playback.
 - 3 short presses: Restart current album
 - Long hold: Play next album
 
-When the radio so "Off" it remains internally powered and will remember what album and track were last played, and will continue from that point when it is turned back on (at the beginning of the track. If the radio is unplugged or power is lost, the radio will start back at the first album and track when it is turned "On" again.
+When the radio is "Off" it remains internally powered and will remember what album and track were last played, and will continue from that point when it is turned back on (at the beginning of the track. If the radio is unplugged or power is lost, the radio will start back at the first album and track when it is turned "On" again.
 
 ---
 ## Firmware Installation
@@ -50,7 +50,7 @@ You can find the latest stable released version from the [Releases page](https:/
 
 **NOTE:**
 - If there are newer Alpha or Beta releases, you can try those for testing but not recommended for production.
-- For production I recommend always using the most recent official Release.
+- For production I recommend always using the most recent official release.
 
 ### The Easy Way
 
