@@ -564,8 +564,6 @@ def app_next_album(last):
             led.color(App.Colors.IDLE)
         app_wait(App.Timing.GUARD)
 
-        # TODO scan for more folders here
-
         dfp.play_folder_track(album, track, large=large)
 
     return State.PLAY_TRACK
