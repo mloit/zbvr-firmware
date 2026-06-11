@@ -104,6 +104,9 @@ if Config.I2C.ENABLE:
               scl  = Config.I2C.Pins.SCL, 
               freq = Config.I2C.RATE)
 
+# this will get set to true once the WDT becomes enabled
+use_wdt = False
+
 # ****************************************************************************
 # REPL/Host Connection 
 # ****************************************************************************
@@ -168,7 +171,8 @@ def generate_playlist(folders = -1, files = -1):
 
     for dir in range(folders):
         tracks = dfp.get_file_count(dir + 1)
-        wdt.feed()
+        if use_wdt:
+            wdt.feed()
 
         if tracks:
             print("+", end="")
@@ -233,7 +237,8 @@ def scan_find():
     print("Scanning: ", end="")
     for dir in range(scan_index, dfp_folders):
         tracks = dfp.get_file_count(dir + 1)
-        wdt.feed()
+        if use_wdt:
+            wdt.feed()
 
         scan_index = dir + 1
         if tracks:
@@ -733,7 +738,8 @@ def fade_and_play_effect(folder, track, large=False):
             wav.stop()
             raise
 
-    wdt.feed()
+    if use_wdt:
+        wdt.feed()
 
     # start playing the new track
     try:
@@ -765,7 +771,8 @@ def fade_and_play_effect(folder, track, large=False):
         raise
 
     wav.stop()
-    wdt.feed()
+    if use_wdt:
+        wdt.feed()
 
     if Config.LED.ENABLE:
         led.color(App.Colors.PLAYING_SONG)
@@ -794,8 +801,12 @@ if App.Effects.ENABLE:
 # startup teh watchdog with a 7.5 second timeout
 # once started it cannot be stopped, so must periodically call feed()
 # before the timeout is reached
-wdt = WDT(timeout=7500)
-wdt.feed()
+if not is_host_attached():
+    wdt = WDT(timeout=7500)
+    wdt.feed()
+    use_wdt = True
+else:
+    print("Host connection detected, WDT not enabled")
 
 # ****************************************************************************
 # Main Loop
@@ -820,7 +831,8 @@ def main():
 
     last = None
     while True:
-        wdt.feed()
+        if use_wdt:
+            wdt.feed()
         # basic loop logic
 
         # check power state, force power_down if power was lost
@@ -896,14 +908,17 @@ if __name__ == "__main__":
             interval += 1
             if interval >= 50:
                 interval = 0
-                wdt.feed()
+                if use_wdt:
+                    wdt.feed()
         print("resetting in 1 second")
-        wdt.feed()
+        if use_wdt:
+            wdt.feed()
         if Config.LED.ENABLE:
             led.color(App.Colors.WARNING)
         time.sleep_ms(1000)
 
-    wdt.feed()
+    if use_wdt:
+        wdt.feed()
     if is_host_attached():
         machine.soft_reset() # software only reset (maintains REPL connection)
     else:
