@@ -14,7 +14,7 @@
 # 
 #  (c) Copyright 2026 Mark Loit. All Rights Reserved.
 # ****************************************************************************
-# Baseline 26.0.1 - Retro Radio 
+# Baseline 26.0.2 - Retro Radio 
 #
 #
 # Notes:
@@ -42,6 +42,8 @@
 # - added "all tracks" shuffle, when enabled long-press reshuffles and starts over instead of advancing album
 # - added a quickstart mode to do background scanning for albums in order to get faster boot time
 # - added watchdog timer to reset in case of full crashes
+# - improved watchdog to not be used when a REPL/CDC connection is detected
+# - adjusted timeouts during discovery to fix issue with larger libraries, added wdt feed code to the slow methods
 
 # Known issues:
 # - if there is a gap in folder names, some folders after the gaps may be missed in the scan as we only scan
@@ -50,6 +52,7 @@
 #      are scanned and used
 
 import micropython
+import os
 import time, machine
 from machine import Pin, I2C, WDT
 
@@ -64,11 +67,15 @@ from dfplayer import DFPlayer, DFequalizer_strings, DFequalizer
 from controls import Controls
 from playlist import Playlist
 
-_VERSION = "26.0.1"
+_VERSION = "26.0.2"
 
 lev = micropython.opt_level()
 print(f"\nMicroPython Optimization Level: {lev}")
 micropython.mem_info()
+stat = os.statvfs('/')
+total_size = stat[1] * stat[2]
+free_size  = stat[0] * stat[3]
+print(f"Flash: {total_size / (1024*1024):.2f} MB, {free_size / (1024*1024):.2f} MB Free")
 
 print("\nInitiailzing Modules")
 
@@ -103,9 +110,6 @@ if Config.I2C.ENABLE:
               sda  = Config.I2C.Pins.SDA, 
               scl  = Config.I2C.Pins.SCL, 
               freq = Config.I2C.RATE)
-
-# this will get set to true once the WDT becomes enabled
-use_wdt = False
 
 # ****************************************************************************
 # REPL/Host Connection 
@@ -153,14 +157,14 @@ def generate_playlist(folders = -1, files = -1):
     scan_remain = 0
 
     if files == -1:
-        files = dfp.get_total_files()
+        files = dfp.get_total_files(wdt=wdt)
 
     if files == 0:
         print("SDCard has no files")
         return
 
     if folders == -1:
-        folders = dfp.get_folder_count()
+        folders = dfp.get_folder_count(wdt=wdt)
 
     if folders == 0:
         print("SDCard has no folders")
@@ -170,8 +174,8 @@ def generate_playlist(folders = -1, files = -1):
     print("Scanning: ", end="")
 
     for dir in range(folders):
-        tracks = dfp.get_file_count(dir + 1)
-        if use_wdt:
+        tracks = dfp.get_file_count(dir + 1, wdt=wdt)
+        if wdt:
             wdt.feed()
 
         if tracks:
@@ -206,14 +210,14 @@ def display_playlist():
 def scan_init(folders = -1, files = -1):
     global is_scanning, scan_index, scan_remain, dfp_tracks, dfp_folders
     if files == -1:
-        files = dfp.get_total_files()
+        files = dfp.get_total_files(wdt=wdt)
 
     if files == 0:
         print("SDCard has no files")
         return
 
     if folders == -1:
-        folders = dfp.get_folder_count()
+        folders = dfp.get_folder_count(wdt=wdt)
 
     if folders == 0:
         print("SDCard has no folders")
@@ -236,8 +240,8 @@ def scan_find():
 
     print("Scanning: ", end="")
     for dir in range(scan_index, dfp_folders):
-        tracks = dfp.get_file_count(dir + 1)
-        if use_wdt:
+        tracks = dfp.get_file_count(dir + 1, wdt=wdt)
+        if wdt:
             wdt.feed()
 
         scan_index = dir + 1
@@ -264,7 +268,7 @@ def scan_one():
     print("Probing: ", end="")
     dir = scan_index
     scan_index += 1
-    tracks = dfp.get_file_count(dir + 1)
+    tracks = dfp.get_file_count(dir + 1, wdt=wdt)
 
     if tracks:
         print("+")
@@ -396,8 +400,8 @@ def app_start_up(last):
     if last == State.START_UP:
         return State.PLAY_TRACK
 
-    folders = dfp.get_folder_count()
-    total = dfp.get_total_files()
+    folders = dfp.get_folder_count(wdt=wdt)
+    total = dfp.get_total_files(wdt=wdt)
 
     print("Filesystem has", total, "files in", folders, "folders")
 
@@ -655,8 +659,8 @@ def app_media_load(last):
     if last == State.MEDIA_LOAD:
         return State.PLAY_TRACK
 
-    folders = dfp.get_folder_count()
-    total = dfp.get_total_files()
+    folders = dfp.get_folder_count(wdt=wdt)
+    total = dfp.get_total_files(wdt=wdt)
 
     print("Filesystem has", total, "files in", folders, "folders")
 
@@ -738,7 +742,7 @@ def fade_and_play_effect(folder, track, large=False):
             wav.stop()
             raise
 
-    if use_wdt:
+    if wdt:
         wdt.feed()
 
     # start playing the new track
@@ -771,7 +775,7 @@ def fade_and_play_effect(folder, track, large=False):
         raise
 
     wav.stop()
-    if use_wdt:
+    if wdt:
         wdt.feed()
 
     if Config.LED.ENABLE:
@@ -804,9 +808,12 @@ if App.Effects.ENABLE:
 if not is_host_attached():
     wdt = WDT(timeout=7500)
     wdt.feed()
-    use_wdt = True
 else:
+    wdt = None
     print("Host connection detected, WDT not enabled")
+    if Config.LED.ENABLE:
+        led.color(App.Colors.CONNECTED)
+
 
 # ****************************************************************************
 # Main Loop
@@ -831,7 +838,7 @@ def main():
 
     last = None
     while True:
-        if use_wdt:
+        if wdt:
             wdt.feed()
         # basic loop logic
 
@@ -890,11 +897,15 @@ def app_cleanup():
 if __name__ == "__main__":
     try:
         main()
-    except KeyboardInterrupt: # this is when teh debugger stops the code
+    except KeyboardInterrupt: # this is when the debugger stops the code
         print("\nStopped by user")
         if Config.LED.ENABLE:
-            led.off()
+            if is_host_attached():
+                led.color(App.Colors.CONNECTED)
+            else:
+                led.off()
         app_cleanup()
+        raise # re-raise the exception so micropyton can do it's own thing on a CTRL+C
 
     except Exception as e:
         print("\nError: %s" % e)
@@ -908,16 +919,16 @@ if __name__ == "__main__":
             interval += 1
             if interval >= 50:
                 interval = 0
-                if use_wdt:
+                if wdt:
                     wdt.feed()
         print("resetting in 1 second")
-        if use_wdt:
+        if wdt:
             wdt.feed()
         if Config.LED.ENABLE:
             led.color(App.Colors.WARNING)
         time.sleep_ms(1000)
 
-    if use_wdt:
+    if wdt:
         wdt.feed()
     if is_host_attached():
         machine.soft_reset() # software only reset (maintains REPL connection)
