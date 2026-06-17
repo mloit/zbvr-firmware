@@ -101,8 +101,9 @@ class App:
         PLAYING_WAV     = (0, 10, 8)    # cyan
         PLAYING_SONG    = (0, 0, 10)    # blue
         ACTIVE          = (10, 10, 10)  # White
-        WARNING         = (15, 5, 0)    # yellow
+        WARNING         = (15, 2, 0)    # orange
         ERROR           = (10, 0, 0)    # red
+        CONNECTED       = (15, 5, 0)    # yellow
 
 # ****************************************************************************
 # Hardware configuration
