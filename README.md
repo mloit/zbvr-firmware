@@ -184,6 +184,8 @@ Due to the complexity of managing the naming and encoding of the data I recommen
 
 The DFPlayer module is limited in the partition style and filesystem format used on the SD card. The capacity should also be 64GB or less. The partition style must be `MBR` (Master Boot Record) and not `GPT` (GUID Partition Table). The filesystem must be `FAT16` or `FAT32` (recommended), and cannot be `ExFAT` or any other `FAT` variant. For formatting I recommend the [SD Association Format Utility](https://www.sdcard.org/downloads/formatter/) Most new out-of-box cards should already have the correct format and partition style.
 
+**Note:** `SDXC` cards are formatted `ExFAT` from the factory by specification. Even the SD Association tool linked above will default to `ExFAT` if it determines the card is `SDXC` As such I recommend using `SD` or `SDHC` cards if you can. `SDXC` cards may require you to use low-level disk tools to force the format to be `FAT32`
+
 #### Folder Naming
 
 The DFPlayer only supports folders off of the main/root directory of the SD Card. Each folder is considered an "album" by the firmware. Folders must be named numerically with 2 digits ranging from `01` to `99`. Because the firmware cannot directly query for a list of available folders, it must probe for them. The result of this is that folders must be be sequential starting at `01` without any skips, to guarantee that they will get recognized. Folders may be left empty, if a particular arrangement is required, like when `ALTERNATE_SHUFFLE` is enabled.
