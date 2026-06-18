@@ -46,7 +46,7 @@ When the radio is "Off" it remains internally powered and will remember what alb
 ---
 ## Firmware Installation
 
-You can find the latest stable released version from the [Releases page](https://github.com/mloit/zbvr-firmware/releases/latest) page. (Currently 26.0.1)
+You can find the latest stable released version from the [Releases page](https://github.com/mloit/zbvr-firmware/releases/latest) page. (Currently 26.0.2)
 
 **NOTE:**
 - If there are newer Alpha or Beta releases, you can try those for testing but not recommended for production.
