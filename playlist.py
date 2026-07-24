@@ -424,8 +424,6 @@ class Playlist:
 
         self.albums.previous()
         self.tracks.clear()
-        self.load_tracks()
-        self.tracks.end()
 
         return self.current()
 
@@ -451,6 +449,10 @@ class Playlist:
     # returns true if the current album is the last one in the playlist
     def is_last_album(self):
         return self.albums.is_last()
+
+    # returns true if the current album is the first one in the playlist
+    def is_first_album(self):
+        return self.albums.is_first()
 
     # retuns true if this is the last track of the last album
     def is_last(self):

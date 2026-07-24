@@ -39,7 +39,10 @@ The top button affects playback.
 - 1 short press: Play next track
 - 2 short presses: Play previous track
 - 3 short presses: Restart current album
-- Long hold: Play next album
+- 4 short presses: Play previous album
+- 1 second hold: Play next album
+- 5 second hold: Restart the RP2040 on release
+- 10 second hold: Soft shutdown, press the button again to wake
 
 When the radio is "Off" it remains internally powered and will remember what album and track were last played, and will continue from that point when it is turned back on (at the beginning of the track. If the radio is unplugged or power is lost, the radio will start back at the first album and track when it is turned "On" again.
 
