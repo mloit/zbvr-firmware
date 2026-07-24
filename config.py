@@ -73,7 +73,7 @@ class App:
         # When set to false, startup is a bit slower as a full scan of the SD card contents is performed before 
         # playback begins. This can feel unreasonably long with large collections on the disk
         # Default Setting: True
-        QUCKSTART        = False
+        QUCKSTART        = True
 
     class Effects:
         # enables the use of the PWM Audio module,
