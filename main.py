@@ -4,7 +4,7 @@
 #         About: Baseline firmware for the Zion Brock Vintage Radio 
 #
 #          File: main.py
-#       Version: 26.0.1 Alpha
+#       Version: 26.0.3
 #   Description: main application logic for the Vintage Radio Firmware
 # 
 #        Author: Mark Loit
@@ -14,7 +14,7 @@
 # 
 #  (c) Copyright 2026 Mark Loit. All Rights Reserved.
 # ****************************************************************************
-# Baseline 26.0.2 - Retro Radio 
+# Baseline 26.0.3 - Retro Radio 
 #
 #
 # Notes:
@@ -67,7 +67,7 @@ from dfplayer import DFPlayer, DFequalizer_strings, DFequalizer
 from controls import Controls
 from playlist import Playlist
 
-_VERSION = "26.0.2"
+_VERSION = "26.0.3"
 
 lev = micropython.opt_level()
 print(f"\nMicroPython Optimization Level: {lev}")
@@ -326,6 +326,7 @@ def app_idle(last):
 
     if power_sense.value() == 1:
         print("Power On Detected")
+        app_wait(500) # wait 1/2 second before proceeding to allow for power to stabilize
         return State.BOOT
 
     last_hint = time.ticks_ms()
@@ -348,6 +349,12 @@ def app_boot(last):
 
     if dfp.is_online():
         print("DFPlayer online, ready to proceed")
+
+        # ver = dfp.get_version()
+        # vst = dfp.get_version(ver=ver)
+
+        # print(f"DFPlayer Version: {ver:04x} {vst:04x}")
+
         return State.MEDIA_CHECK
 
     return State.BOOT

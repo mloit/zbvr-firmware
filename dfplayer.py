@@ -84,6 +84,16 @@ class DFcmd:
         GET_TRACKS   = 0x4e # 4e 0? 00 xx -- number of tracks in folder (01 - 99) (3.7.3)
         GET_FOLDERS  = 0x4f # 4f 0? 00 00 -- number of folders on current storage (3.7.4)
 
+    class yx: # Extended commands found in the YX5200 clone datasheet
+        GET_MODE     = 0x45 # 45 0? 00 00 -- get current play mode
+        GET_VER      = 0x46 # 46 0? 00 00 -- get the current software version (result should be ASCII)
+    class gd: # Extended commands found in the GD3200 clone datasheet
+        GET_MODE     = 0x45 # 45 0? 00 00 -- get current play mode
+        GET_VER      = 0x46 # 46 0? 00 00 -- get the current software version (result should be ASCII)
+    class df: # undocumented commands for DFPlayer (FN-M16P)
+        GET_MODE     = 0x45 # 45 0? 00 00 -- returns 0000 when stopped, 0001 when playing
+        GET_VER      = 0x46 # 46 0? 00 00 -- seems to always return 0005
+
 # ****************************************************************************
 # Parameter Constants
 # ****************************************************************************
@@ -681,7 +691,7 @@ class DFPlayer:
     #     USB_TOTAL     47 0? 00 00 -- number of tracks in usb drive
     #     SDC_TOTAL     48 0? 00 00 -- number of tracks in sd drive
     #     FLASH_TOTAL   49 0? 00 00 -- number of tracks in onboard FLASH  (not documented, but in ref code)
-    def get_total_files(self, storage = DFstorage.AUTO, timeout=_DF_TOTAL_QUERY_TIMEOUT, wdt = None):
+    def get_total_files(self, storage = DFstorage.AUTO, timeout=_DF_TOTAL_QUERY_TIMEOUT, wdt=None):
         self._print(f"DF: get_total_files({DFstorage_strings[storage]})")
 
         if storage == DFstorage.AUTO:
@@ -754,7 +764,7 @@ class DFPlayer:
 
     # get file count for the specified folder on the current drive
     #     GET_TRACKS   4e 0? 00 xx -- number of tracks in folder (01 - 99) (3.7.3)
-    def get_file_count(self, folder, timeout=_DF_FILE_QUERY_TIMEOUT, wdt = None):
+    def get_file_count(self, folder, timeout=_DF_FILE_QUERY_TIMEOUT, wdt=None):
         self._print(f"DF: get_file_count({folder:02d}) [{DFstorage_strings[self._storage & _STORAGE_MASK]}]")
         # if a folder doesn't exist, or has no files, it will result in a "not found" error response
         # so we want to trap that and return 0
@@ -768,7 +778,7 @@ class DFPlayer:
     # The command appears to return the total number of folders on the disk, including ROOT
     # the function subtracts one to account for ROOT
     #     GET_FOLDERS  4f 0? 00 00 -- number of folders on current storage (3.7.4)
-    def get_folder_count(self, timeout=_DF_FOLDER_QUERY_TIMEOUT, wdt = None):
+    def get_folder_count(self, timeout=_DF_FOLDER_QUERY_TIMEOUT, wdt=None):
         self._print(f"DF: get_folder_count() [{DFstorage_strings[self._storage & _STORAGE_MASK]}]")
 
         try:
@@ -1108,6 +1118,20 @@ class DFPlayer:
     # and a new object will need to be created
     def release(self):
         self._uart.deinit()
+
+    # extended commands (undocumented)
+    def get_version(self, ver=0):
+        self._print("DF: get_version()")
+        self._send_query(DFcmd.df.GET_VER, arg=ver)
+
+        return self._get_query_result()
+
+    def get_mode(self):
+        self._print("DF: get_mode()")
+        self._send_query(DFcmd.df.GET_MODE)
+
+        return self._get_query_result()
+
 
 
 # ****************************************************************************
