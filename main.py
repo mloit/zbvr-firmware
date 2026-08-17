@@ -94,7 +94,8 @@ pin_busy    = Pin(Config.Busy.PIN, Pin.IN, Pin.PULL_DOWN)
 # configure the DFPlayer module
 dfp = DFPlayer(Config.DFPlayer.UART.UNIT, 
                tx = Config.DFPlayer.UART.Pins.TX, 
-               rx = Config.DFPlayer.UART.Pins.RX)
+               rx = Config.DFPlayer.UART.Pins.RX,
+               ack = False)
 
 # configure the button control module
 button = Controls(Config.Button.PIN, 
@@ -148,6 +149,7 @@ dfp_tracks       = -1     # number of tracks reported on disk
 is_scanning      = False  # flag set if background folder scan is in progress
 scan_index       = 0      # current folder index of scan
 scan_remain      = 0      # number of remaining files to be found
+SCAN_FOLDERS     = 99     # maximum numbered DFPlayer folders to probe
 
 # Dynamically determines the playlist from the contents of the SD 
 def generate_playlist(folders = -1, files = -1):
@@ -198,6 +200,38 @@ def generate_playlist(folders = -1, files = -1):
     playlist.prepare()
     display_playlist()
 
+def generate_playlist_by_probe(max_folders=99):
+    global is_scanning, scan_index, scan_remain
+
+    is_scanning = False
+    scan_index = 0
+    scan_remain = 0
+
+    print("Discovering playlist by folder probe")
+    print("Scanning: ", end="")
+
+    for dir in range(max_folders):
+        folder = dir + 1
+        tracks = dfp.get_file_count(folder, wdt=wdt)
+        if wdt:
+            wdt.feed()
+
+        if not tracks:
+            print(".", end="")
+            if not playlist.is_empty():
+                break
+            continue
+
+        print("+", end="")
+        if (dir > 14) and (tracks > 255):
+            tracks = 255
+
+        playlist.add(folder, tracks, ((dir & 1) == 1) and App.Playlist.ALTERNATE_SHUFFLE)
+
+    print("")
+    playlist.prepare()
+    display_playlist()
+
 # visually displays the playlist contents
 def display_playlist():
     albums = playlist.get_albums()
@@ -211,28 +245,15 @@ def display_playlist():
 # initialize the background scanning
 def scan_init(folders = -1, files = -1):
     global is_scanning, scan_index, scan_remain, dfp_tracks, dfp_folders
-    if files == -1:
-        files = dfp.get_total_files(wdt=wdt)
-
-    if files == 0:
-        print("SDCard has no files")
-        return
-
-    if folders == -1:
-        folders = dfp.get_folder_count(wdt=wdt)
-
-    if folders == 0:
-        print("SDCard has no folders")
-        return
 
     if is_scanning: # if flag set, we attempt to resume the scan
         print("Resuming Discovery")
         return
 
-    print("Discovering playlist (background scan)")
-    dfp_tracks  = files
-    dfp_folders = folders
-    scan_remain = files
+    print("Discovering playlist (background probe scan)")
+    dfp_tracks  = -1
+    dfp_folders = SCAN_FOLDERS
+    scan_remain = -1
     scan_index  = 0
     is_scanning = True
 
@@ -241,8 +262,9 @@ def scan_find():
     global is_scanning, scan_index, scan_remain, dfp_tracks, dfp_folders
 
     print("Scanning: ", end="")
-    for dir in range(scan_index, dfp_folders):
-        tracks = dfp.get_file_count(dir + 1, wdt=wdt)
+    for dir in range(scan_index, SCAN_FOLDERS):
+        folder = dir + 1
+        tracks = dfp.get_file_count(folder, wdt=wdt)
         if wdt:
             wdt.feed()
 
@@ -253,13 +275,15 @@ def scan_find():
             if (dir > 14) and (tracks > 255):
                 tracks = 255
 
-            playlist.add(dir+1, tracks, ((dir & 1) == 1) and App.Playlist.ALTERNATE_SHUFFLE)
-            scan_remain -= tracks
+            playlist.add(folder, tracks, ((dir & 1) == 1) and App.Playlist.ALTERNATE_SHUFFLE)
             break
         else:
             print(".",end="")
+            if not playlist.is_empty():
+                is_scanning = False
+                break
     print("")
-    if (scan_remain == 0) or (scan_index >= dfp_folders):
+    if scan_index >= SCAN_FOLDERS:
         print("Playlist Discovery complete")
         is_scanning = False
 
@@ -270,7 +294,8 @@ def scan_one():
     print("Probing: ", end="")
     dir = scan_index
     scan_index += 1
-    tracks = dfp.get_file_count(dir + 1, wdt=wdt)
+    folder = dir + 1
+    tracks = dfp.get_file_count(folder, wdt=wdt)
 
     if tracks:
         print("+")
@@ -278,12 +303,12 @@ def scan_one():
         if (dir > 14) and (tracks > 255):
             tracks = 255
 
-        playlist.add(dir+1, tracks, ((dir & 1) == 1) and App.Playlist.ALTERNATE_SHUFFLE)
-        scan_remain -= tracks
+        playlist.add(folder, tracks, ((dir & 1) == 1) and App.Playlist.ALTERNATE_SHUFFLE)
     else:
         print(".")
+        is_scanning = False
 
-    if (scan_remain == 0) or (scan_index >= dfp_folders):
+    if scan_index >= SCAN_FOLDERS:
         print("Playlist Discovery complete")
         is_scanning = False
 
@@ -409,28 +434,22 @@ def app_start_up(last):
     if last == State.START_UP:
         return State.PLAY_TRACK
 
-    folders = dfp.get_folder_count(wdt=wdt)
-    total = dfp.get_total_files(wdt=wdt)
-
-    print("Filesystem has", total, "files in", folders, "folders")
-
-    rebuild = False
-    if (not App.Playlist.PRESEVE) or (folders != dfp_folders) or (total != dfp_tracks):
-        rebuild = True
+    if not App.Playlist.QUCKSTART:
         if not playlist.is_empty():
             playlist.clear()
-
-    if rebuild:
-        if App.Playlist.QUCKSTART:
-            scan_init(folders, total)
+        generate_playlist_by_probe()
+        dfp_folders = playlist.get_albums()
+        dfp_tracks = playlist.get_total_tracks()
+    else:
+        rebuild = (not App.Playlist.PRESEVE) or playlist.is_empty()
+        if rebuild:
+            if not playlist.is_empty():
+                playlist.clear()
+            scan_init()
             scan_find()
             playlist.prepare()
             if not is_scanning:
                 display_playlist()
-        else:
-            generate_playlist(folders, total)
-            dfp_folders = folders
-            dfp_tracks = total
 
     # no point in continuing if there are no music files
     if playlist.is_empty():
@@ -668,28 +687,22 @@ def app_media_load(last):
     if last == State.MEDIA_LOAD:
         return State.PLAY_TRACK
 
-    folders = dfp.get_folder_count(wdt=wdt)
-    total = dfp.get_total_files(wdt=wdt)
-
-    print("Filesystem has", total, "files in", folders, "folders")
-
-    rebuild = False
-    if (not App.Playlist.PRESEVE) or (folders != dfp_folders) or (total != dfp_tracks):
-        rebuild = True
+    if not App.Playlist.QUCKSTART:
         if not playlist.is_empty():
             playlist.clear()
-
-    if rebuild:
-        if App.Playlist.QUCKSTART:
-            scan_init(folders, total)
+        generate_playlist_by_probe()
+        dfp_folders = playlist.get_albums()
+        dfp_tracks = playlist.get_total_tracks()
+    else:
+        rebuild = (not App.Playlist.PRESEVE) or playlist.is_empty()
+        if rebuild:
+            if not playlist.is_empty():
+                playlist.clear()
+            scan_init()
             scan_find()
             playlist.prepare()
             if not is_scanning:
                 display_playlist()
-        else:
-            generate_playlist(folders, total)
-            dfp_folders = folders
-            dfp_tracks = total
 
     # no point in continuing if there are no music files
     if playlist.is_empty():
