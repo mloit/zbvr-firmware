@@ -30,7 +30,10 @@ print("Loading Module: Controls")
 #   1 press → Next track
 #   2 presses → Previous track
 #   3 presses → Restart album
+#   4 presses → Previous album
 #   Long hold → Next album
+#   Restart hold → Reset RP2040
+#   Halt hold → Soft shutdown
 # timing is determined by 4 parameters: debounce, short_press, long_press, tap_window
 # For a press to register as short: short_press <= press <= long_press
 # For a press to register as long: long_press <= press
@@ -41,15 +44,20 @@ class Controls:
         SINGLE = 1
         DOUBLE = 2
         TRIPLE = 3
-        LONG   = 4
+        QUAD   = 4
+        LONG   = 5
+        RESTART = 6
+        HALT    = 7
     # create an instance of the controls monitor
     # pin: pin number for the button input
     # rate: speed in Hz at which the input should be sampled
     # debounce: debounce interval in ms
     # short_press: minimum length for a short press in ms (for filtering out accidental presses)
     # long_press: length of a long press in ms
+    # restart_press: length of a restart hold in ms
+    # halt_press: length of a soft shutdown hold in ms
     # tap_window: max gap between presses to register for multiple presses in ms
-    def __init__(self, pin, pull=1, invert=False, rate=100, debounce=50, short_press=200, long_press=1000, tap_gap=800):
+    def __init__(self, pin, pull=1, invert=False, rate=100, debounce=50, short_press=200, long_press=1000, restart_press=10000, halt_press=15000, tap_gap=800):
         # init the gpio here
         if pull < 0:
             self._pin = Pin(pin, Pin.IN, Pin.PULL_DOWN)
@@ -70,6 +78,8 @@ class Controls:
         # save our trigger thresholds
         self._min_press = short_press    # minimum press time to filter out accidental presses
         self._max_press = long_press     # anything longer than this is registered as a long press
+        self._restart_press = restart_press
+        self._halt_press = halt_press
         self._max_gap = tap_gap          # max amount of time between presses to register as multi-tap action
 
         # timer related
@@ -164,7 +174,7 @@ class Controls:
         # basic code for single/long type events only
         if self._in_event:
             if (not state) and state == last: # timeout
-                count = max(0, min(3, count)) # clamp count to 3
+                count = max(0, min(4, count)) # clamp count to 4
                 self._event = count
                 self._has_event = True
                 self._in_event = False # event is done
@@ -172,17 +182,33 @@ class Controls:
             elif not state: # it was a release
                 then = self._event_start
                 duration = time.ticks_diff(now, then)
-                if duration >= self._max_press:  # test for long press first
+                if duration >= self._halt_press:
+                    self._event = Controls.Event.HALT
+                    self._has_event = True
+                    self._in_event = False # event is done
+                    count = 0
+                elif duration >= self._restart_press:
+                    self._event = Controls.Event.RESTART
+                    self._has_event = True
+                    self._in_event = False # event is done
+                    count = 0
+                elif duration >= self._max_press:  # test for long press first
                     self._event = Controls.Event.LONG
                     self._has_event = True
                     self._in_event = False # event is done
                     count = 0
                 elif duration >= self._min_press: # short press / tap
                     count += 1
-                    irq_state = machine.disable_irq() # begin critical section
-                    self._timeout = self._max_gap
-                    self._wait_timeout = True
-                    machine.enable_irq(irq_state) # End of critical section
+                    if count >= Controls.Event.QUAD:
+                        self._event = Controls.Event.QUAD
+                        self._has_event = True
+                        self._in_event = False # event is done
+                        count = 0
+                    else:
+                        irq_state = machine.disable_irq() # begin critical section
+                        self._timeout = self._max_gap
+                        self._wait_timeout = True
+                        machine.enable_irq(irq_state) # End of critical section
         else:
             count = 0
 
@@ -205,6 +231,14 @@ class Controls:
 
     def has_event(self):
         return self._has_event
+
+    def is_pressed(self):
+        return self._button
+
+    def hold_duration(self):
+        if not self._button:
+            return 0
+        return time.ticks_diff(time.ticks_ms(), self._event_start)
 
     # starts up the timer and monitoring, resets state
     def start(self):

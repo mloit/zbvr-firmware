@@ -94,7 +94,8 @@ pin_busy    = Pin(Config.Busy.PIN, Pin.IN, Pin.PULL_DOWN)
 # configure the DFPlayer module
 dfp = DFPlayer(Config.DFPlayer.UART.UNIT, 
                tx = Config.DFPlayer.UART.Pins.TX, 
-               rx = Config.DFPlayer.UART.Pins.RX)
+               rx = Config.DFPlayer.UART.Pins.RX,
+               ack = False)
 
 # configure the button control module
 button = Controls(Config.Button.PIN, 
@@ -104,7 +105,9 @@ button = Controls(Config.Button.PIN,
                   debounce    = Config.Button.DEBOUNCE, 
                   tap_gap     = Config.Button.TAP_GAP,
                   short_press = Config.Button.SHORT_PRESS, 
-                  long_press  = Config.Button.LONG_PRESS)
+                  long_press  = Config.Button.LONG_PRESS,
+                  restart_press = Config.Button.RESTART_PRESS,
+                  halt_press  = Config.Button.HALT_PRESS)
 
 # configure I2C if used
 if Config.I2C.ENABLE:
@@ -148,6 +151,7 @@ dfp_tracks       = -1     # number of tracks reported on disk
 is_scanning      = False  # flag set if background folder scan is in progress
 scan_index       = 0      # current folder index of scan
 scan_remain      = 0      # number of remaining files to be found
+SCAN_FOLDERS     = 99     # maximum numbered DFPlayer folders to probe
 
 # Dynamically determines the playlist from the contents of the SD 
 def generate_playlist(folders = -1, files = -1):
@@ -198,6 +202,38 @@ def generate_playlist(folders = -1, files = -1):
     playlist.prepare()
     display_playlist()
 
+def generate_playlist_by_probe(max_folders=99):
+    global is_scanning, scan_index, scan_remain
+
+    is_scanning = False
+    scan_index = 0
+    scan_remain = 0
+
+    print("Discovering playlist by folder probe")
+    print("Scanning: ", end="")
+
+    for dir in range(max_folders):
+        folder = dir + 1
+        tracks = dfp.get_file_count(folder, wdt=wdt)
+        if wdt:
+            wdt.feed()
+
+        if not tracks:
+            print(".", end="")
+            if not playlist.is_empty():
+                break
+            continue
+
+        print("+", end="")
+        if (dir > 14) and (tracks > 255):
+            tracks = 255
+
+        playlist.add(folder, tracks, ((dir & 1) == 1) and App.Playlist.ALTERNATE_SHUFFLE)
+
+    print("")
+    playlist.prepare()
+    display_playlist()
+
 # visually displays the playlist contents
 def display_playlist():
     albums = playlist.get_albums()
@@ -211,28 +247,15 @@ def display_playlist():
 # initialize the background scanning
 def scan_init(folders = -1, files = -1):
     global is_scanning, scan_index, scan_remain, dfp_tracks, dfp_folders
-    if files == -1:
-        files = dfp.get_total_files(wdt=wdt)
-
-    if files == 0:
-        print("SDCard has no files")
-        return
-
-    if folders == -1:
-        folders = dfp.get_folder_count(wdt=wdt)
-
-    if folders == 0:
-        print("SDCard has no folders")
-        return
 
     if is_scanning: # if flag set, we attempt to resume the scan
         print("Resuming Discovery")
         return
 
-    print("Discovering playlist (background scan)")
-    dfp_tracks  = files
-    dfp_folders = folders
-    scan_remain = files
+    print("Discovering playlist (background probe scan)")
+    dfp_tracks  = -1
+    dfp_folders = SCAN_FOLDERS
+    scan_remain = -1
     scan_index  = 0
     is_scanning = True
 
@@ -241,8 +264,9 @@ def scan_find():
     global is_scanning, scan_index, scan_remain, dfp_tracks, dfp_folders
 
     print("Scanning: ", end="")
-    for dir in range(scan_index, dfp_folders):
-        tracks = dfp.get_file_count(dir + 1, wdt=wdt)
+    for dir in range(scan_index, SCAN_FOLDERS):
+        folder = dir + 1
+        tracks = dfp.get_file_count(folder, wdt=wdt)
         if wdt:
             wdt.feed()
 
@@ -253,13 +277,15 @@ def scan_find():
             if (dir > 14) and (tracks > 255):
                 tracks = 255
 
-            playlist.add(dir+1, tracks, ((dir & 1) == 1) and App.Playlist.ALTERNATE_SHUFFLE)
-            scan_remain -= tracks
+            playlist.add(folder, tracks, ((dir & 1) == 1) and App.Playlist.ALTERNATE_SHUFFLE)
             break
         else:
             print(".",end="")
+            if not playlist.is_empty():
+                is_scanning = False
+                break
     print("")
-    if (scan_remain == 0) or (scan_index >= dfp_folders):
+    if scan_index >= SCAN_FOLDERS:
         print("Playlist Discovery complete")
         is_scanning = False
 
@@ -270,7 +296,8 @@ def scan_one():
     print("Probing: ", end="")
     dir = scan_index
     scan_index += 1
-    tracks = dfp.get_file_count(dir + 1, wdt=wdt)
+    folder = dir + 1
+    tracks = dfp.get_file_count(folder, wdt=wdt)
 
     if tracks:
         print("+")
@@ -278,12 +305,12 @@ def scan_one():
         if (dir > 14) and (tracks > 255):
             tracks = 255
 
-        playlist.add(dir+1, tracks, ((dir & 1) == 1) and App.Playlist.ALTERNATE_SHUFFLE)
-        scan_remain -= tracks
+        playlist.add(folder, tracks, ((dir & 1) == 1) and App.Playlist.ALTERNATE_SHUFFLE)
     else:
         print(".")
+        is_scanning = False
 
-    if (scan_remain == 0) or (scan_index >= dfp_folders):
+    if scan_index >= SCAN_FOLDERS:
         print("Playlist Discovery complete")
         is_scanning = False
 
@@ -303,9 +330,14 @@ class State:
     MEDIA_WAIT  = 9  # SD Card was reoved, waiting for insertion
     MEDIA_LOAD  = 10 # SD Card was inserted, reload and resume playback
     POWER_DN    = 11 # Potentiometer just turned off (Next: IDLE)
+    HALT        = 12 # Soft shutdown, waiting for button press to wake
 
 app_state = State.IDLE
 states = {}
+long_hold_feedback = False
+restart_hold_feedback = False
+halt_hold_feedback = False
+halt_wait_release = False
 
 # break longer waits into smaller parts to allow background tasks to run
 def app_wait(duration):
@@ -313,6 +345,39 @@ def app_wait(duration):
         time.sleep_ms(App.Timing.STEP)
         duration -= App.Timing.STEP
     time.sleep_ms(duration)
+
+def update_hold_feedback():
+    global long_hold_feedback, restart_hold_feedback, halt_hold_feedback
+
+    if not Config.LED.ENABLE:
+        return None
+
+    if not button.is_pressed():
+        long_hold_feedback = False
+        restart_hold_feedback = False
+        halt_hold_feedback = False
+        return None
+
+    duration = button.hold_duration()
+    color = None
+    if (duration >= Config.Button.HALT_PRESS) and not halt_hold_feedback:
+        halt_hold_feedback = True
+        color = App.Colors.ERROR
+    elif (duration >= Config.Button.RESTART_PRESS) and not restart_hold_feedback:
+        restart_hold_feedback = True
+        color = App.Colors.WARNING
+    elif (duration >= Config.Button.LONG_PRESS) and not long_hold_feedback:
+        long_hold_feedback = True
+        color = App.Colors.ACTIVE
+
+    if color:
+        led.color(color)
+        app_wait(150)
+        led.color(App.Colors.PLAYING_SONG)
+        if duration >= Config.Button.HALT_PRESS:
+            return State.HALT
+
+    return None
 
 # ****************************************************************************
 # states should accept one parameter assumed to be "next"
@@ -409,28 +474,22 @@ def app_start_up(last):
     if last == State.START_UP:
         return State.PLAY_TRACK
 
-    folders = dfp.get_folder_count(wdt=wdt)
-    total = dfp.get_total_files(wdt=wdt)
-
-    print("Filesystem has", total, "files in", folders, "folders")
-
-    rebuild = False
-    if (not App.Playlist.PRESEVE) or (folders != dfp_folders) or (total != dfp_tracks):
-        rebuild = True
+    if not App.Playlist.QUCKSTART:
         if not playlist.is_empty():
             playlist.clear()
-
-    if rebuild:
-        if App.Playlist.QUCKSTART:
-            scan_init(folders, total)
+        generate_playlist_by_probe()
+        dfp_folders = playlist.get_albums()
+        dfp_tracks = playlist.get_total_tracks()
+    else:
+        rebuild = (not App.Playlist.PRESEVE) or playlist.is_empty()
+        if rebuild:
+            if not playlist.is_empty():
+                playlist.clear()
+            scan_init()
             scan_find()
             playlist.prepare()
             if not is_scanning:
                 display_playlist()
-        else:
-            generate_playlist(folders, total)
-            dfp_folders = folders
-            dfp_tracks = total
 
     # no point in continuing if there are no music files
     if playlist.is_empty():
@@ -470,6 +529,10 @@ def app_play(last):
         if Config.LED.ENABLE:
             led.color(App.Colors.PLAYING_SONG)
 
+    next_state = update_hold_feedback()
+    if next_state is not None:
+        return next_state
+
     # check if playback stopped naturally
     if (not dfp.is_playing()) or button.has_event():
         album, track = playlist.current()
@@ -500,6 +563,18 @@ def app_next(last):
     if button.has_event():
         evt = button.get_event()
 
+    if evt == Controls.Event.RESTART:
+        print(" -- Restart hold detected: Resetting RP2040")
+        if Config.LED.ENABLE:
+            led.color(App.Colors.WARNING)
+        dfp.stop()
+        app_wait(App.Timing.GUARD)
+        machine.reset()
+
+    if evt == Controls.Event.HALT:
+        print(" -- Halt hold detected: Soft shutdown")
+        return State.HALT
+
     # check for Long Press first, we don't want the stop and pause effect
     # of a normal transition, so we can fade out and in with the AM Radio sound
     if evt == Controls.Event.LONG: # next album, or reshuffle
@@ -520,6 +595,17 @@ def app_next(last):
                 if not is_scanning:
                     display_playlist()
             album, track = playlist.next_album()
+        print(f"Changing to: Album {album:02d} Track {track:03d}")
+        return State.NEXT_ALBUM
+
+    if evt == Controls.Event.QUAD:
+        print(" -- Quad button press detected: Previous Album")
+        if playlist.is_first_album():
+            while is_scanning:
+                scan_one()
+            playlist.prepare()
+            display_playlist()
+        album, track = playlist.previous_album()
         print(f"Changing to: Album {album:02d} Track {track:03d}")
         return State.NEXT_ALBUM
 
@@ -668,28 +754,22 @@ def app_media_load(last):
     if last == State.MEDIA_LOAD:
         return State.PLAY_TRACK
 
-    folders = dfp.get_folder_count(wdt=wdt)
-    total = dfp.get_total_files(wdt=wdt)
-
-    print("Filesystem has", total, "files in", folders, "folders")
-
-    rebuild = False
-    if (not App.Playlist.PRESEVE) or (folders != dfp_folders) or (total != dfp_tracks):
-        rebuild = True
+    if not App.Playlist.QUCKSTART:
         if not playlist.is_empty():
             playlist.clear()
-
-    if rebuild:
-        if App.Playlist.QUCKSTART:
-            scan_init(folders, total)
+        generate_playlist_by_probe()
+        dfp_folders = playlist.get_albums()
+        dfp_tracks = playlist.get_total_tracks()
+    else:
+        rebuild = (not App.Playlist.PRESEVE) or playlist.is_empty()
+        if rebuild:
+            if not playlist.is_empty():
+                playlist.clear()
+            scan_init()
             scan_find()
             playlist.prepare()
             if not is_scanning:
                 display_playlist()
-        else:
-            generate_playlist(folders, total)
-            dfp_folders = folders
-            dfp_tracks = total
 
     # no point in continuing if there are no music files
     if playlist.is_empty():
@@ -710,6 +790,45 @@ def app_media_load(last):
     return State.PLAY_TRACK
 
 states[State.MEDIA_LOAD] = app_media_load
+
+# ****************************************************************************
+# Soft shutdown state
+# stops playback and waits for any button event to wake
+def app_halt(last):
+    global halt_wait_release
+
+    if last != State.HALT:
+        print("Soft shutdown")
+        if App.Effects.ENABLE and wav.is_playing():
+            wav.stop()
+        try:
+            if dfp.is_online() and not dfp.is_stopped():
+                dfp.stop()
+        except DFPlayer.Error:
+            pass
+        if Config.LED.ENABLE:
+            led.off()
+        if not button.is_runnning():
+            button.start()
+        halt_wait_release = button.is_pressed()
+
+    if halt_wait_release:
+        if not button.is_pressed():
+            if button.has_event():
+                button.get_event()
+            halt_wait_release = False
+        return State.HALT
+
+    if button.has_event():
+        button.get_event()
+        print("Wake button event detected")
+        if Config.LED.ENABLE:
+            led.color(App.Colors.WAITING)
+        return State.BOOT
+
+    return State.HALT
+
+states[State.HALT] = app_halt
 
 # ****************************************************************************
 # AM Radio Effect Playback

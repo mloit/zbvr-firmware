@@ -136,6 +136,8 @@ class Config:
         TAP_GAP       = 800       # Max time between taps for multi-tap detection (milliseconds)
         SHORT_PRESS   = 50        # Minimum length to register as a press (milliseconds)
         LONG_PRESS    = 1000      # Long press threshold (milliseconds)
+        RESTART_PRESS = 5000      # Restart threshold (milliseconds)
+        HALT_PRESS    = 10000     # Soft shutdown threshold (milliseconds)
 
 # Power Sense -- used for dertermining when the radio is "on" (RP2040 is assumed to be always on)
     class Sense:
