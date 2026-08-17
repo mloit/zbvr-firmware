@@ -84,7 +84,9 @@ if Config.LED.ENABLE:
     led.color(Config.LED.DEFAULT)
 
 # initialize the sense GPIO's
-power_sense = Pin(Config.Sense.PIN, Pin.IN, Pin.PULL_DOWN)
+# we use PULL_UP here to try and ensure that thresholds are met for VIH
+# previously PULL_DOWN caused some boards to fail to sense when the radio was turned on
+power_sense = Pin(Config.Sense.PIN, Pin.IN, Pin.PULL_UP)
 
 # not used anymore, initialized anyway to prevent side-effects
 pin_busy    = Pin(Config.Busy.PIN, Pin.IN, Pin.PULL_DOWN)  
