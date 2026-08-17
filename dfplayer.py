@@ -771,8 +771,12 @@ class DFPlayer:
     def get_folder_count(self, timeout=_DF_FOLDER_QUERY_TIMEOUT, wdt = None):
         self._print(f"DF: get_folder_count() [{DFstorage_strings[self._storage & _STORAGE_MASK]}]")
 
-        self._send_query(DFcmd.query.GET_FOLDERS, timeout=timeout, wdt=wdt)
-        return self._get_query_result() - 1
+        try:
+            self._send_query(DFcmd.query.GET_FOLDERS, timeout=timeout, wdt=wdt)
+        except self.TimeoutError:
+            return 0 # behave as if no folders were found if we get no response
+    #    return self._get_query_result() - 1
+        return self._get_query_result() # seems some DF players return the correct number (worst case is we try to play a track from a folder that doesn't exist)
 
 # ****************************************************************************
 # Playbck Controls
